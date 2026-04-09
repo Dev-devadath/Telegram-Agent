@@ -1,0 +1,17 @@
+# render.yaml — Render deployment config
+services:
+  - type: web
+    name: household-telegram-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python run_telegram.py
+    plan: free
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: MANAGER_CHAT_ID
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
