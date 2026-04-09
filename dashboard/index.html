@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="AI Household Staff Performance Manager — Performance Overview Dashboard">
+    <title>Staff Performance Overview — Household Manager</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Navigation -->
+        <nav class="nav">
+            <a href="/" class="nav-logo">
+                <div class="nav-logo-icon">🏠</div>
+                <span class="nav-logo-text">Household AI</span>
+            </a>
+            <ul class="nav-links">
+                <li><a href="/" class="active">Overview</a></li>
+                <li><a href="/manager">Manager</a></li>
+                <li><a href="/secretary">Secretary</a></li>
+                <li><a href="/worker/driver-1">Driver 1</a></li>
+                <li><a href="/worker/driver-2">Driver 2</a></li>
+                <li><a href="/worker/cook">Cook</a></li>
+                <li><a href="/worker/massager">Massager</a></li>
+                <li><a href="/worker/pa">PA</a></li>
+                <li><a href="/worker/social-media">Social Media</a></li>
+            </ul>
+        </nav>
+
+        <!-- Page Header -->
+        <div class="page-header">
+            <h1>Performance Overview</h1>
+            <p>End-of-day analytics — track your household staff performance at a glance</p>
+        </div>
+
+        <!-- Stats Grid -->
+        <div class="stats-grid" id="stats-grid">
+            <div class="stat-card purple">
+                <div class="stat-icon purple">👥</div>
+                <div class="card-title">Total Workers</div>
+                <div class="card-value" id="total-workers">6</div>
+                <div class="card-subtitle">Active staff members</div>
+            </div>
+            <div class="stat-card green">
+                <div class="stat-icon green">✅</div>
+                <div class="card-title">Tasks Completed</div>
+                <div class="card-value" id="total-completed">0</div>
+                <div class="card-subtitle">Verified by secretary</div>
+            </div>
+            <div class="stat-card yellow">
+                <div class="stat-icon yellow">⏳</div>
+                <div class="card-title">Pending Tasks</div>
+                <div class="card-value" id="total-pending">0</div>
+                <div class="card-subtitle">Assigned or in progress</div>
+            </div>
+            <div class="stat-card blue">
+                <div class="stat-icon blue">📊</div>
+                <div class="card-title">Avg Performance</div>
+                <div class="card-value" id="avg-score">—</div>
+                <div class="card-subtitle">Across all workers</div>
+            </div>
+        </div>
+
+        <!-- Charts -->
+        <div class="charts-grid">
+            <div class="chart-card">
+                <h3>Worker Performance Scores</h3>
+                <canvas id="performance-chart"></canvas>
+            </div>
+            <div class="chart-card">
+                <h3>Task Distribution by Role</h3>
+                <canvas id="distribution-chart"></canvas>
+            </div>
+        </div>
+
+        <!-- Worker Cards -->
+        <div class="page-header" style="margin-top: 8px;">
+            <h1>Staff Directory</h1>
+            <p>Click a worker to view their detailed page</p>
+        </div>
+        <div class="workers-grid" id="workers-grid">
+            <!-- Filled by JS -->
+        </div>
+
+        <!-- Salary Recommendations -->
+        <div class="page-header" style="margin-top: 8px;">
+            <h1>Salary Recommendations</h1>
+            <p>Based on current performance scores</p>
+        </div>
+        <div class="salary-grid" id="salary-grid">
+            <!-- Filled by JS -->
+        </div>
+    </div>
+
+    <script>
+        const API = '';
+
+        function scoreClass(score) {
+            if (score > 90) return 'high';
+            if (score >= 70) return 'mid';
+            return 'low';
+        }
+
+        function avatarClass(role) {
+            const map = { 'Driver': 'driver', 'Cook': 'cook', 'Massager': 'massager', 'PA': 'pa', 'Social Media': 'social-media' };
+            return map[role] || 'driver';
+        }
+
+        function avatarEmoji(role) {
+            const map = { 'Driver': '🚗', 'Cook': '👨‍🍳', 'Massager': '💆', 'PA': '📋', 'Social Media': '📱' };
+            return map[role] || '👤';
+        }
+
+        async function loadOverview() {
+            try {
+                // Fetch all data in parallel
+                const [perfRes, trendsRes, distRes, salaryRes, pendingRes] = await Promise.all([
+                    fetch(`${API}/api/performance`).then(r => r.json()),
+                    fetch(`${API}/api/trends`).then(r => r.json()),
+                    fetch(`${API}/api/distribution`).then(r => r.json()),
+                    fetch(`${API}/api/salary`).then(r => r.json()),
+                    fetch(`${API}/api/tasks/pending`).then(r => r.json()),
+                ]);
+
+                // Stats
+                const workers = perfRes.workers_performance || [];
+                const avgScore = workers.length
+                    ? (workers.reduce((s, w) => s + w.metrics.performance_score, 0) / workers.length).toFixed(1)
+                    : '—';
+
+                document.getElementById('total-completed').textContent = trendsRes.summary?.completed || 0;
+                document.getElementById('total-pending').textContent = pendingRes.count || 0;
+                document.getElementById('avg-score').textContent = avgScore;
+
+                // Performance Chart
+                renderPerformanceChart(workers);
+
+                // Distribution Chart
+                renderDistributionChart(distRes.distribution || {});
+
+                // Worker Cards
+                renderWorkerCards(workers);
+
+                // Salary
+                renderSalaryCards(salaryRes.recommendations || []);
+            } catch (err) {
+                console.error('Failed to load overview:', err);
+            }
+        }
+
+        function renderPerformanceChart(workers) {
+            const ctx = document.getElementById('performance-chart').getContext('2d');
+            const labels = workers.map(w => w.worker.name);
+            const scores = workers.map(w => w.metrics.performance_score);
+            const colors = scores.map(s =>
+                s > 90 ? '#10b981' : s >= 70 ? '#f59e0b' : '#ef4444'
+            );
+
+            new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels,
+                    datasets: [{
+                        label: 'Performance Score',
+                        data: scores,
+                        backgroundColor: colors,
+                        borderRadius: 8,
+                        borderSkipped: false,
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: { display: false },
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            max: 100,
+                            ticks: { color: '#8b8b9e' },
+                            grid: { color: 'rgba(255,255,255,0.04)' },
+                        },
+                        x: {
+                            ticks: { color: '#8b8b9e' },
+                            grid: { display: false },
+                        }
+                    }
+                }
+            });
+        }
+
+        function renderDistributionChart(dist) {
+            const ctx = document.getElementById('distribution-chart').getContext('2d');
+            const roles = Object.keys(dist);
+            const completed = roles.map(r => dist[r].completed || 0);
+            const rejected = roles.map(r => dist[r].rejected || 0);
+            const pending = roles.map(r => (dist[r].total || 0) - (dist[r].completed || 0) - (dist[r].rejected || 0));
+
+            if (roles.length === 0) {
+                ctx.font = '14px Inter';
+                ctx.fillStyle = '#5a5a6e';
+                ctx.textAlign = 'center';
+                ctx.fillText('No tasks assigned yet', ctx.canvas.width / 2, ctx.canvas.height / 2);
+                return;
+            }
+
+            new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: roles,
+                    datasets: [{
+                        data: roles.map(r => dist[r].total || 0),
+                        backgroundColor: ['#7c3aed', '#3b82f6', '#10b981', '#f59e0b', '#ec4899', '#06b6d4'],
+                        borderWidth: 0,
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    cutout: '65%',
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: { color: '#8b8b9e', padding: 16, font: { size: 12 } }
+                        }
+                    }
+                }
+            });
+        }
+
+        function renderWorkerCards(workers) {
+            const grid = document.getElementById('workers-grid');
+            grid.innerHTML = workers.map(w => {
+                const sc = scoreClass(w.metrics.performance_score);
+                const ac = avatarClass(w.worker.role);
+                const emoji = avatarEmoji(w.worker.role);
+                return `
+                    <a href="/worker/${w.worker.id}" class="worker-card">
+                        <div class="worker-card-header">
+                            <div class="worker-avatar ${ac}">${emoji}</div>
+                            <div class="worker-info">
+                                <h4>${w.worker.name}</h4>
+                                <span>${w.worker.role}</span>
+                            </div>
+                        </div>
+                        <div class="worker-metrics">
+                            <div class="metric">
+                                <span class="metric-value score-${sc}">${w.metrics.performance_score}</span>
+                                <span class="metric-label">Score</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-value">${w.metrics.completed}</span>
+                                <span class="metric-label">Done</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-value">${w.metrics.total_tasks}</span>
+                                <span class="metric-label">Total</span>
+                            </div>
+                        </div>
+                        <div class="score-bar">
+                            <div class="score-bar-fill ${sc}" style="width: ${w.metrics.performance_score}%"></div>
+                        </div>
+                    </a>
+                `;
+            }).join('');
+        }
+
+        function renderSalaryCards(recs) {
+            const grid = document.getElementById('salary-grid');
+            grid.innerHTML = recs.map(r => {
+                const icon = r.recommendation === 'increase' ? '📈' : r.recommendation === 'warning' ? '⚠️' : '➡️';
+                const changeText = r.suggested_change > 0
+                    ? `+₹${r.suggested_change}`
+                    : r.suggested_change < 0 ? `₹${r.suggested_change}` : 'No change';
+                return `
+                    <div class="salary-card ${r.recommendation}">
+                        <div class="card-header">
+                            <span>${icon} ${r.worker.name}</span>
+                            <span class="status-badge status-${r.recommendation === 'increase' ? 'completed' : r.recommendation === 'warning' ? 'rejected' : 'assigned'}">${r.recommendation}</span>
+                        </div>
+                        <p style="color: var(--text-secondary); font-size: 13px; margin: 8px 0;">${r.reasoning}</p>
+                        <div style="display: flex; justify-content: space-between; margin-top: 12px;">
+                            <div>
+                                <div style="font-size: 12px; color: var(--text-muted);">Current</div>
+                                <div style="font-weight: 700;">₹${r.current_salary.toLocaleString()}</div>
+                            </div>
+                            <div>
+                                <div style="font-size: 12px; color: var(--text-muted);">Change</div>
+                                <div style="font-weight: 700; color: ${r.suggested_change > 0 ? 'var(--accent-green)' : r.suggested_change < 0 ? 'var(--accent-red)' : 'var(--text-secondary)'};">${changeText}</div>
+                            </div>
+                            <div>
+                                <div style="font-size: 12px; color: var(--text-muted);">Suggested</div>
+                                <div style="font-weight: 700;">₹${r.suggested_salary.toLocaleString()}</div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        loadOverview();
+        // Refresh every 15 seconds
+        setInterval(loadOverview, 15000);
+    </script>
+</body>
+</html>

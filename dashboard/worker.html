@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Worker task page for AI Household Staff Performance Manager">
+    <title>Worker — Household Manager</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Navigation -->
+        <nav class="nav">
+            <a href="/" class="nav-logo">
+                <div class="nav-logo-icon">🏠</div>
+                <span class="nav-logo-text">Household AI</span>
+            </a>
+            <ul class="nav-links">
+                <li><a href="/">Overview</a></li>
+                <li><a href="/manager">Manager</a></li>
+                <li><a href="/secretary">Secretary</a></li>
+                <li><a href="/worker/driver-1">Driver 1</a></li>
+                <li><a href="/worker/driver-2">Driver 2</a></li>
+                <li><a href="/worker/cook">Cook</a></li>
+                <li><a href="/worker/massager">Massager</a></li>
+                <li><a href="/worker/pa">PA</a></li>
+                <li><a href="/worker/social-media">Social Media</a></li>
+            </ul>
+        </nav>
+
+        <!-- Worker Profile Header -->
+        <div class="page-header" id="worker-header">
+            <h1 id="worker-name">Loading...</h1>
+            <p id="worker-role"></p>
+        </div>
+
+        <!-- Performance Summary -->
+        <div class="stats-grid" id="worker-stats">
+            <!-- Filled by JS -->
+        </div>
+
+        <!-- Worker Performance Chart -->
+        <div class="charts-grid" style="margin-bottom: 32px;">
+            <div class="chart-card">
+                <h3>Task Breakdown</h3>
+                <canvas id="worker-chart"></canvas>
+            </div>
+            <div class="chart-card">
+                <h3 style="margin-bottom: 16px;">Suggested Next Tasks</h3>
+                <div id="suggestions">
+                    <div class="loading"><div class="loading-spinner"></div></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tasks -->
+        <div class="page-header">
+            <h1>My Tasks</h1>
+            <p>View and update your assigned tasks</p>
+        </div>
+        <div id="tasks-container">
+            <div class="loading">
+                <div class="loading-spinner"></div>
+                <p style="margin-top: 12px;">Loading tasks...</p>
+            </div>
+        </div>
+
+        <!-- Chat with system -->
+        <div class="page-header" style="margin-top: 32px;">
+            <h1>Chat</h1>
+            <p>Talk to the AI system about your tasks</p>
+        </div>
+        <div class="chat-container" style="height: 400px;">
+            <div class="chat-messages" id="chat-messages">
+                <div class="chat-message agent">
+                    <div class="author">🤖 System</div>
+                    Hello! I'm here to help with your tasks. You can mark tasks as completed, ask for new task suggestions, or discuss anything work-related.
+                </div>
+            </div>
+            <div class="chat-input-area">
+                <input
+                    type="text"
+                    class="chat-input"
+                    id="chat-input"
+                    placeholder="Type a message..."
+                    autocomplete="off"
+                >
+                <button class="chat-send-btn" id="chat-send" onclick="sendMessage()">Send</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Get worker ID from URL
+        const workerId = window.location.pathname.split('/worker/')[1];
+        let workerChart = null;
+
+        async function loadWorkerProfile() {
+            try {
+                const [workerRes, perfRes, suggestRes, tasksRes] = await Promise.all([
+                    fetch(`/api/workers/${workerId}`).then(r => r.json()),
+                    fetch(`/api/performance/${workerId}`).then(r => r.json()),
+                    fetch(`/api/recommendations/${workerId}`).then(r => r.json()),
+                    fetch(`/api/tasks?worker_id=${workerId}`).then(r => r.json()),
+                ]);
+
+                const worker = workerRes.worker;
+                const metrics = perfRes.metrics || {};
+
+                // Header
+                document.getElementById('worker-name').textContent = worker?.name || workerId;
+                document.getElementById('worker-role').textContent = `${worker?.role || ''} · ₹${(worker?.salary || 0).toLocaleString()}/mo`;
+                document.title = `${worker?.name || 'Worker'} — Household Manager`;
+
+                // Highlight active nav link
+                document.querySelectorAll('.nav-links a').forEach(a => {
+                    if (a.getAttribute('href') === `/worker/${workerId}`) {
+                        a.classList.add('active');
+                    }
+                });
+
+                // Stats
+                const scoreClass = metrics.performance_score > 90 ? 'high' : metrics.performance_score >= 70 ? 'mid' : 'low';
+                document.getElementById('worker-stats').innerHTML = `
+                    <div class="stat-card purple">
+                        <div class="stat-icon purple">📊</div>
+                        <div class="card-title">Performance Score</div>
+                        <div class="card-value score-${scoreClass}">${metrics.performance_score || '—'}</div>
+                        <div class="score-bar"><div class="score-bar-fill ${scoreClass}" style="width: ${metrics.performance_score || 0}%"></div></div>
+                    </div>
+                    <div class="stat-card green">
+                        <div class="stat-icon green">✅</div>
+                        <div class="card-title">Completed</div>
+                        <div class="card-value">${metrics.completed || 0}</div>
+                        <div class="card-subtitle">${metrics.completion_rate || 0}% completion rate</div>
+                    </div>
+                    <div class="stat-card yellow">
+                        <div class="stat-icon yellow">⏳</div>
+                        <div class="card-title">In Progress</div>
+                        <div class="card-value">${(metrics.assigned || 0) + (metrics.in_progress || 0)}</div>
+                        <div class="card-subtitle">Active tasks</div>
+                    </div>
+                    <div class="stat-card blue">
+                        <div class="stat-icon blue">🔍</div>
+                        <div class="card-title">Verification Rate</div>
+                        <div class="card-value">${metrics.verification_success_rate || 0}%</div>
+                        <div class="card-subtitle">Confirmed by secretary</div>
+                    </div>
+                `;
+
+                // Chart
+                renderWorkerChart(metrics);
+
+                // Suggestions
+                const suggestContainer = document.getElementById('suggestions');
+                const suggestions = suggestRes.suggested_tasks || [];
+                suggestContainer.innerHTML = suggestions.length > 0
+                    ? `<div class="task-list">${suggestions.map(s => `
+                        <div class="task-item">
+                            <div class="task-info">
+                                <div class="task-desc">💡 ${s}</div>
+                            </div>
+                        </div>
+                    `).join('')}</div>`
+                    : '<div class="empty-state"><p>No suggestions available</p></div>';
+
+                // Tasks
+                renderTasks(tasksRes.tasks || []);
+
+            } catch (err) {
+                console.error('Error loading worker:', err);
+                document.getElementById('worker-name').textContent = 'Error loading worker';
+            }
+        }
+
+        function renderWorkerChart(metrics) {
+            const ctx = document.getElementById('worker-chart').getContext('2d');
+            if (workerChart) workerChart.destroy();
+
+            workerChart = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: ['Completed', 'In Progress', 'Assigned', 'Rejected'],
+                    datasets: [{
+                        data: [
+                            metrics.completed || 0,
+                            metrics.in_progress || 0,
+                            metrics.assigned || 0,
+                            metrics.rejected || 0,
+                        ],
+                        backgroundColor: ['#10b981', '#f59e0b', '#3b82f6', '#ef4444'],
+                        borderWidth: 0,
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    cutout: '65%',
+                    plugins: {
+                        legend: {
+                            position: 'bottom',
+                            labels: { color: '#8b8b9e', padding: 12, font: { size: 12 } }
+                        }
+                    }
+                }
+            });
+        }
+
+        function renderTasks(tasks) {
+            const container = document.getElementById('tasks-container');
+
+            if (tasks.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">📭</div>
+                        <p>No tasks assigned yet</p>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = `<div class="task-list">${tasks.map(t => {
+                const canUpdate = t.status === 'assigned' || t.status === 'in_progress';
+                return `
+                    <div class="task-item">
+                        <div class="task-info">
+                            <div class="task-desc">${t.description}</div>
+                            <div class="task-meta">Assigned: ${new Date(t.assigned_at).toLocaleString()}${t.completed_at ? ' · Completed: ' + new Date(t.completed_at).toLocaleString() : ''}</div>
+                        </div>
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <span class="status-badge status-${t.status}">${t.status.replace('_', ' ')}</span>
+                            ${canUpdate && t.status === 'assigned' ? `<button class="btn btn-primary" onclick="updateTask('${t.id}', 'in_progress')">Start</button>` : ''}
+                            ${canUpdate && t.status === 'in_progress' ? `<button class="btn btn-confirm" onclick="updateTask('${t.id}', 'completed')">Complete</button>` : ''}
+                        </div>
+                    </div>
+                `;
+            }).join('')}</div>`;
+        }
+
+        async function updateTask(taskId, status) {
+            try {
+                await fetch('/api/tasks/status', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ task_id: taskId, new_status: status }),
+                });
+
+                // If completed, also request verification
+                if (status === 'completed') {
+                    await fetch(`/api/verifications/${taskId}`, { method: 'POST' });
+                }
+
+                loadWorkerProfile();
+            } catch (err) {
+                alert('Error updating task: ' + err.message);
+            }
+        }
+
+        // Chat
+        const chatMessages = document.getElementById('chat-messages');
+        const chatInput = document.getElementById('chat-input');
+
+        chatInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        function addMessage(text, type, author = '') {
+            const div = document.createElement('div');
+            div.className = `chat-message ${type}`;
+            div.innerHTML = author
+                ? `<div class="author">${author}</div>${text.replace(/\n/g, '<br>')}`
+                : text.replace(/\n/g, '<br>');
+            chatMessages.appendChild(div);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        async function loadChatHistory() {
+            try {
+                const res = await fetch(`/api/chat/history?user_id=${workerId}`);
+                const data = await res.json();
+                
+                if (data.history && data.history.length > 0) {
+                    // Clear the default welcome message if we have history
+                    chatMessages.innerHTML = '';
+                    
+                    for (const msg of data.history) {
+                        const type = msg.role === 'user' ? 'user' : 'agent';
+                        const author = msg.role === 'user' ? '' : `🤖 ${msg.author}`;
+                        addMessage(msg.text, type, author);
+                    }
+                }
+            } catch (err) {
+                console.error("Failed to load history", err);
+            }
+        }
+
+        async function sendMessage() {
+            const message = chatInput.value.trim();
+            if (!message) return;
+
+            addMessage(message, 'user');
+            chatInput.value = '';
+            document.getElementById('chat-send').disabled = true;
+
+            try {
+                const res = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message, user_id: workerId }),
+                });
+                const data = await res.json();
+
+                if (data.responses) {
+                    for (const resp of data.responses) {
+                        if (resp.text && resp.text.trim()) {
+                            addMessage(resp.text, 'agent', `🤖 ${resp.author}`);
+                        }
+                    }
+                }
+            } catch (err) {
+                addMessage(`Error: ${err.message}`, 'agent', '⚠️ System');
+            }
+
+            document.getElementById('chat-send').disabled = false;
+            chatInput.focus();
+            loadWorkerProfile();
+        }
+
+        loadWorkerProfile();
+        loadChatHistory();
+        setInterval(loadWorkerProfile, 15000);
+    </script>
+</body>
+</html>

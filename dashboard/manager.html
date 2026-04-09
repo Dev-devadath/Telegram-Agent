@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Manager chat interface for AI Household Staff Performance Manager">
+    <title>Manager Chat — Household Manager</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Navigation -->
+        <nav class="nav">
+            <a href="/" class="nav-logo">
+                <div class="nav-logo-icon">🏠</div>
+                <span class="nav-logo-text">Household AI</span>
+            </a>
+            <ul class="nav-links">
+                <li><a href="/">Overview</a></li>
+                <li><a href="/manager" class="active">Manager</a></li>
+                <li><a href="/secretary">Secretary</a></li>
+                <li><a href="/worker/driver-1">Driver 1</a></li>
+                <li><a href="/worker/driver-2">Driver 2</a></li>
+                <li><a href="/worker/cook">Cook</a></li>
+                <li><a href="/worker/massager">Massager</a></li>
+                <li><a href="/worker/pa">PA</a></li>
+                <li><a href="/worker/social-media">Social Media</a></li>
+            </ul>
+        </nav>
+
+        <!-- Page Header -->
+        <div class="page-header">
+            <h1>Manager Console</h1>
+            <p>Chat with the AI system to manage tasks, check performance, and get insights</p>
+        </div>
+
+        <!-- Chat -->
+        <div class="chat-container">
+            <div class="chat-messages" id="chat-messages">
+                <div class="chat-message agent">
+                    <div class="author">🤖 Manager Agent</div>
+                    Hello! I'm your AI Household Manager. I can help you with:
+                    <br><br>
+                    • <strong>Assign tasks</strong> — "Assign car washing to Driver 1"<br>
+                    • <strong>Check performance</strong> — "How is the Cook performing?"<br>
+                    • <strong>Salary insights</strong> — "Show salary recommendations"<br>
+                    • <strong>Task suggestions</strong> — "What should Driver 2 do next?"<br>
+                    • <strong>Verify tasks</strong> — "What tasks need verification?"
+                </div>
+            </div>
+            <div class="chat-input-area">
+                <input
+                    type="text"
+                    class="chat-input"
+                    id="chat-input"
+                    placeholder="Type a message... (e.g., 'Assign car washing to Driver 1')"
+                    autocomplete="off"
+                >
+                <button class="chat-send-btn" id="chat-send" onclick="sendMessage()">Send</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const chatMessages = document.getElementById('chat-messages');
+        const chatInput = document.getElementById('chat-input');
+        const sendBtn = document.getElementById('chat-send');
+
+        chatInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+
+        function addMessage(text, type, author = '') {
+            const div = document.createElement('div');
+            div.className = `chat-message ${type}`;
+            if (author) {
+                div.innerHTML = `<div class="author">${author}</div>${formatText(text)}`;
+            } else {
+                div.innerHTML = formatText(text);
+            }
+            chatMessages.appendChild(div);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        function formatText(text) {
+            // Simple markdown-like formatting
+            return text
+                .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                .replace(/\n/g, '<br>')
+                .replace(/• /g, '&bull; ');
+        }
+
+        async function loadChatHistory() {
+            try {
+                const res = await fetch(`/api/chat/history?user_id=manager`);
+                const data = await res.json();
+                
+                if (data.history && data.history.length > 0) {
+                    // Clear the default welcome message if we have history
+                    chatMessages.innerHTML = '';
+                    
+                    for (const msg of data.history) {
+                        const type = msg.role === 'user' ? 'user' : 'agent';
+                        const author = msg.role === 'user' ? '' : `🤖 ${msg.author}`;
+                        addMessage(msg.text, type, author);
+                    }
+                }
+            } catch (err) {
+                console.error("Failed to load history", err);
+            }
+        }
+
+        async function sendMessage() {
+            const message = chatInput.value.trim();
+            if (!message) return;
+
+            addMessage(message, 'user');
+            chatInput.value = '';
+            sendBtn.disabled = true;
+
+            // Show typing indicator
+            const typingDiv = document.createElement('div');
+            typingDiv.className = 'chat-message agent';
+            typingDiv.innerHTML = '<div class="loading-spinner"></div>';
+            typingDiv.id = 'typing-indicator';
+            chatMessages.appendChild(typingDiv);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+
+            try {
+                const res = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message, user_id: 'manager' }),
+                });
+                const data = await res.json();
+
+                // Remove typing indicator
+                document.getElementById('typing-indicator')?.remove();
+
+                if (data.responses && data.responses.length > 0) {
+                    for (const resp of data.responses) {
+                        if (resp.text && resp.text.trim()) {
+                            const authorLabel = resp.author === 'manager_agent' ? '🤖 Manager'
+                                : resp.author === 'task_agent' ? '📋 Task Agent'
+                                : resp.author === 'verification_agent' ? '✅ Verification Agent'
+                                : resp.author === 'performance_agent' ? '📊 Performance Agent'
+                                : resp.author === 'salary_agent' ? '💰 Salary Agent'
+                                : resp.author === 'recommendation_agent' ? '💡 Recommendation Agent'
+                                : `🤖 ${resp.author}`;
+                            addMessage(resp.text, 'agent', authorLabel);
+                        }
+                    }
+                } else {
+                    addMessage('No response received. Please try again.', 'agent', '⚠️ System');
+                }
+            } catch (err) {
+                document.getElementById('typing-indicator')?.remove();
+                addMessage(`Error: ${err.message}`, 'agent', '⚠️ System');
+            }
+
+            sendBtn.disabled = false;
+            chatInput.focus();
+        }
+        loadChatHistory();
+    </script>
+</body>
+</html>
