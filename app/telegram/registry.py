@@ -1,6 +1,6 @@
 """
 Registry mapping worker_id ↔ Telegram chat_id.
-Manager chat_id is loaded from the MANAGER_CHAT_ID env var.
+Manager chat IDs are loaded from MANAGER_CHAT_ID: one ID, or several comma-separated.
 Workers self-register via /start in the bot.
 """
 
@@ -12,10 +12,31 @@ from app.store import WORKERS
 TELEGRAM_REGISTRY: dict[str, int] = {}
 
 
+def get_manager_chat_ids() -> list[int]:
+    """All manager Telegram chat IDs from MANAGER_CHAT_ID (comma-separated allowed)."""
+    raw = os.environ.get("MANAGER_CHAT_ID", "").strip()
+    if not raw:
+        return []
+    out: list[int] = []
+    seen: set[int] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            cid = int(part)
+        except ValueError:
+            continue
+        if cid not in seen:
+            seen.add(cid)
+            out.append(cid)
+    return out
+
+
 def get_manager_chat_id() -> int | None:
-    """Return the manager's chat ID from environment, or None."""
-    val = os.environ.get("MANAGER_CHAT_ID")
-    return int(val) if val else None
+    """First manager chat ID from environment, or None (backward compatible)."""
+    ids = get_manager_chat_ids()
+    return ids[0] if ids else None
 
 
 def register_worker(worker_id: str, chat_id: int) -> bool:
@@ -53,6 +74,5 @@ def get_registered_workers() -> dict[str, int]:
 
 
 def is_manager(chat_id: int) -> bool:
-    """Check if the given chat_id belongs to the manager."""
-    mgr = get_manager_chat_id()
-    return mgr is not None and mgr == chat_id
+    """Check if the given chat_id belongs to a manager."""
+    return chat_id in get_manager_chat_ids()

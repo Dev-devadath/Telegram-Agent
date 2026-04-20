@@ -31,7 +31,7 @@ def main():
     """Start the Telegram bot."""
     from telegram import Update
     from app.telegram.bot import build_application
-    from app.telegram.registry import get_manager_chat_id
+    from app.telegram.registry import get_manager_chat_ids
 
     # Validation
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -39,8 +39,8 @@ def main():
         logger.error("❌ TELEGRAM_BOT_TOKEN not set in .env")
         return
 
-    manager_id = get_manager_chat_id()
-    if not manager_id:
+    manager_ids = get_manager_chat_ids()
+    if not manager_ids:
         logger.warning("⚠️  MANAGER_CHAT_ID not set in .env")
 
     use_polling = "--poll" in sys.argv
@@ -48,7 +48,9 @@ def main():
     logger.info("═" * 50)
     logger.info("🤖 AI Household Staff Manager — Telegram Bot")
     logger.info("═" * 50)
-    logger.info(f"Manager chat ID: {manager_id or 'NOT SET'}")
+    logger.info(
+        f"Manager chat ID(s): {', '.join(str(i) for i in manager_ids) or 'NOT SET'}"
+    )
     logger.info(f"Mode: {'POLLING (local)' if use_polling else 'WEBHOOK (production)'}")
     logger.info("═" * 50)
 

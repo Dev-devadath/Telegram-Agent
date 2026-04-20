@@ -21,7 +21,7 @@ from app.telegram.registry import (
     get_chat_id,
     get_worker_by_chat,
     get_registered_workers,
-    get_manager_chat_id,
+    get_manager_chat_ids,
     is_manager,
 )
 from app.telegram import agent_bridge
@@ -272,15 +272,14 @@ async def task_response_callback(update: Update, context: ContextTypes.DEFAULT_T
     if agent_bridge.is_worker_done_responding(worker_id):
         summary = agent_bridge.get_worker_response_summary(worker_id)
 
-        # Notify manager
-        manager_chat = get_manager_chat_id()
-        if manager_chat:
-            buttons = [
-                [
-                    InlineKeyboardButton("✅ Confirm", callback_data=f"confirm_{worker_id}"),
-                    InlineKeyboardButton("❌ Reject", callback_data=f"reject_{worker_id}"),
-                ]
+        # Notify all managers
+        buttons = [
+            [
+                InlineKeyboardButton("✅ Confirm", callback_data=f"confirm_{worker_id}"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"reject_{worker_id}"),
             ]
+        ]
+        for manager_chat in get_manager_chat_ids():
             await context.bot.send_message(
                 chat_id=manager_chat,
                 text=summary,
