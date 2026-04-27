@@ -454,16 +454,29 @@ async def testmode_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 def get_all_handlers() -> list:
     """Return all handlers to register with the Application."""
-    return [
-        CommandHandler("start", start_command),
-        CommandHandler("status", status_command),
-        CommandHandler("broadcast", broadcast_command),
-        CommandHandler("report", report_command),
-        CommandHandler("testmode", testmode_command),
-        # Callback queries
-        CallbackQueryHandler(register_callback, pattern=r"^register_"),
-        CallbackQueryHandler(task_response_callback, pattern=r"^task_(yes|no)_"),
-        CallbackQueryHandler(manager_confirm_callback, pattern=r"^(confirm|reject)_"),
-        # Catch-all text messages (must be last)
+    import os
+    bot_mode = os.environ.get("BOT_MODE", "resort").strip().lower()
+
+    if bot_mode == "shop":
+        from app.telegram.shop_handlers import get_shop_handlers
+        handlers = get_shop_handlers()
+    else:
+        handlers = [
+            CommandHandler("start", start_command),
+            CommandHandler("status", status_command),
+            CommandHandler("broadcast", broadcast_command),
+            CommandHandler("report", report_command),
+            CommandHandler("testmode", testmode_command),
+            # Callback queries
+            CallbackQueryHandler(register_callback, pattern=r"^register_"),
+            CallbackQueryHandler(task_response_callback, pattern=r"^task_(yes|no)_"),
+            CallbackQueryHandler(manager_confirm_callback, pattern=r"^(confirm|reject)_"),
+        ]
+
+    # Catch-all text handler must be LAST
+    catch_all = [
         MessageHandler(filters.TEXT & ~filters.COMMAND, manager_message_handler),
     ]
+
+    return handlers + catch_all
+

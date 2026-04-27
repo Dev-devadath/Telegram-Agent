@@ -1,15 +1,23 @@
 """
 Registry mapping worker_id ↔ Telegram chat_id.
-Manager chat IDs are loaded from MANAGER_CHAT_ID: one ID, or several comma-separated.
-Workers self-register via /start in the bot.
+
+Household mode: MANAGER_CHAT_ID env var, TELEGRAM_REGISTRY dict.
+Shop mode: SHOP_OWNER_CHAT_ID env var, SHOP_TELEGRAM_REGISTRY dict.
+
+Workers/staff self-register via /start or /shopstart in the bot.
 """
 
 import os
 from app.store import WORKERS
 
 
+# ── Household Mode Registry ─────────────────────────────────────────
 # worker_id → Telegram chat_id
 TELEGRAM_REGISTRY: dict[str, int] = {}
+
+# ── Shop Mode Registry ──────────────────────────────────────────────
+# staff_id → Telegram chat_id
+SHOP_TELEGRAM_REGISTRY: dict[str, int] = {}
 
 
 def get_manager_chat_ids() -> list[int]:
@@ -76,3 +84,74 @@ def get_registered_workers() -> dict[str, int]:
 def is_manager(chat_id: int) -> bool:
     """Check if the given chat_id belongs to a manager."""
     return chat_id in get_manager_chat_ids()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Shop Mode Functions
+# ═══════════════════════════════════════════════════════════════════
+
+def _parse_chat_ids(env_var: str) -> list[int]:
+    """Parse comma-separated chat IDs from an environment variable."""
+    raw = os.environ.get(env_var, "").strip()
+    if not raw:
+        return []
+    out: list[int] = []
+    seen: set[int] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            cid = int(part)
+        except ValueError:
+            continue
+        if cid not in seen:
+            seen.add(cid)
+            out.append(cid)
+    return out
+
+
+def get_shop_owner_chat_ids() -> list[int]:
+    """Shop owner chat IDs from SHOP_OWNER_CHAT_ID (comma-separated allowed)."""
+    return _parse_chat_ids("SHOP_OWNER_CHAT_ID")
+
+
+def is_shop_owner(chat_id: int) -> bool:
+    """Check if the given chat_id belongs to the shop owner."""
+    return chat_id in get_shop_owner_chat_ids()
+
+
+def register_shop_staff(staff_id: str, chat_id: int) -> bool:
+    """
+    Map a shop staff_id to a Telegram chat_id.
+    Returns True if successful, False if staff_id is invalid.
+    """
+    from app.shop_store import SHOP_STAFF
+    if staff_id not in SHOP_STAFF:
+        return False
+    SHOP_TELEGRAM_REGISTRY[staff_id] = chat_id
+    return True
+
+
+def unregister_shop_staff(staff_id: str) -> bool:
+    """Remove a shop staff member's Telegram mapping."""
+    return SHOP_TELEGRAM_REGISTRY.pop(staff_id, None) is not None
+
+
+def get_shop_chat_id(staff_id: str) -> int | None:
+    """Get the Telegram chat_id for a shop staff member, or None."""
+    return SHOP_TELEGRAM_REGISTRY.get(staff_id)
+
+
+def get_shop_staff_by_chat(chat_id: int) -> str | None:
+    """Reverse lookup: chat_id → shop staff_id."""
+    for sid, cid in SHOP_TELEGRAM_REGISTRY.items():
+        if cid == chat_id:
+            return sid
+    return None
+
+
+def get_registered_shop_staff() -> dict[str, int]:
+    """Return a copy of all registered shop staff."""
+    return dict(SHOP_TELEGRAM_REGISTRY)
+

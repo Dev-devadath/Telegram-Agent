@@ -1,0 +1,72 @@
+,TASK,STAFF,VERIFIER,DATA ANALYST,ADMIN,TIME,REPEAT
+1,Open Shop 1 at 8:00 AM,SANOOF - SE,JUNAID,,HARIS,8.00 AM,DAILY
+2,Clean Shop 1 daily (3 rooms and front side),SANOOF - SE,FAVAN,,HARIS,8.10 AM,DAILY
+3,"Perform monthly cleaning of glasses, surroundings, inner rooms, and godown",SANOOF - SE,FAVAN,,HARIS,AFTERN NOON,30th of Everymonth
+4,Handle customer interactions in Shop 1,SANOOF - SE,JUNAID,,HARIS,ON ARRIVAL,DAILY
+5,Display products properly,SANOOF - SE,JUNAID,,HARIS,BEFORE 12 PM,DAILY
+6,Explain products to customers,SANOOF - SE,JUNAID,,HARIS,ON ARRIVAL,DAILY
+7,Close sales effectively,SANOOF - SE,JUNAID,,HARIS,AFTER T6,DAILY
+8,Perform billing when Haris and Junaid are absent,SANOOF - SE,FAVAN,,HARIS,AFTER T7,DAILY
+9,Collect items from racks as per bills,SANOOF - SE,JUNAID,,HARIS,AFTER T8,DAILY
+10,"Verify item count, type, and brand",SANOOF - SE,FAVAN,,HARIS,AFTER T9,DAILY
+11,Pack items securely,SANOOF - SE,FAVAN,,HARIS,AFTER T10,DAILY
+12,Dispatch items correctly,SANOOF - SE,FAVAN,,HARIS,AFTERT11,
+13,"Process, Count, Verify Sales Returns and Record in Tally Shop-1",SANOOF - SE,JUNAID,,HARIS,ON ARRIVAL,DAILY
+14,Check purchase items against stock and bills,SANOOF - SE,JUNAID,,HARIS,PURCHASE ARRIVAL,DAILY
+15,Arrange display in Shop 1 as per guidelines of Yousuf,SANOOF - SE,JUNAID,,HARIS,DIALY,DAILY
+16,Put back display items inside before closing,SANOOF - SE,HARIS,,HARIS,7.45 PM,DAILY
+17,Close Shop 1 properly and Handover Key to Haris,SANOOF - SE,HARIS,,HARIS,AFTER 8 PM,DAILY
+18,Clean Shop 2 daily (3 rooms and front side),FAVAN-ACOUNTS,SANOOF,,HARIS,8:00 AM,DAILY
+19,"Perform monthly cleaning of glasses, surroundings, and backside",FAVAN-ACOUNTS,SANOOF,,HARIS,AFTERNNOON,30th of Everymonth
+20,Handle customer interactions in Shop 2,FAVAN-ACOUNTS,HARIS,,HARIS,ON ARRIVAL,DAILY
+21,Display products properly,FAVAN-ACOUNTS,HARIS,,HARIS,WHENEVE DISORDERD,DAILY
+22,Explain products to customers,FAVAN-ACOUNTS,JUNAID,,HARIS,ON ARRIVAL,DAILY
+,Close sales effectively,FAVAN-ACOUNTS,JUNAID,,HARIS,AFTER T6,
+,Perform billing ,FAVAN-ACOUNTS,JUNAID,,HARIS,AFTER T7,
+,Collect items from racks as per bills,FAVAN-ACOUNTS,JUNAID,,HARIS,AFTER T8,
+,"Verify item count, type, and brand",FAVAN-ACOUNTS,JUNAID,,HARIS,AFTER T9,
+,Pack items securely,FAVAN-ACOUNTS,JUNAID,,HARIS,AFTER T10,
+,Dispatch items correctly,FAVAN-ACOUNTS,JUNAID,,HARIS,AFTERT11,
+23,Close sales in Shop 2,FAVAN-ACOUNTS,HARIS,,HARIS,ON ARRIVAL,DAILY
+24,"Enter purchase, sales, payment, and receipt data",FAVAN-ACOUNTS,HARIS,,HARIS,ON ARRIVAL,DAILY
+25,Manage accounts and maintain opening and closing cash balance,FAVAN-ACOUNTS,HARIS,,HARIS,ON ARRIVAL,DAILY
+26,"Process, Verify & record sales returns",FAVAN-ACOUNTS,HARIS,,HARIS,ON ARRIVAL,DAILY
+27,Arrange display in Shop 2,FAVAN-ACOUNTS,JUNAID,,HARIS,AFTER NOON,DAILY
+28,Tag product prices clearly,FAVAN-ACOUNTS,JUNAID,,HARIS,AFTER NOON,DAILY
+29,Prepare quotations and follow up to close deals,FAVAN-ACOUNTS,HARIS,,HARIS,ON ARRIVAL,DAILY
+30,Collect items from racks as per bills,JUNAID -SSE,SANOOF,,HARIS,ON ARRIVAL,DAILY
+31,"Verify item count, type, and brand",JUNAID -SSE,SANOOF,,HARIS,AFTEER T30,DAILY
+32,Pack items securely,JUNAID -SSE,SANOOF,,HARIS,AFTER T31,DAILY
+33,Dispatch items correctly,JUNAID -SSE,SANOOF,,HARIS,AFTER T32,DAILY
+34,Handle customer interactions in Shop 1,JUNAID -SSE,SANOOF,,HARIS,ON ARRIVAL,DAILY
+35,Display products properly,JUNAID -SSE,HARIS,,HARIS,AFTER NOON,DAILY
+36,Explain products to customers,JUNAID -SSE,SANOOF,,HARIS,ON ARRIVAL,DAILY
+37,Close sales effectively,JUNAID -SSE,SANOOF,,HARIS,AFTER T37,DAILY
+38,Record customer complaints in the register,JUNAID -SSE,SANOOF,,HARIS,ON ARRIVAL,DAILY
+39,Follow up on complaints with company and customers,JUNAID -SSE,HARIS,,HARIS,NEXT DAY T38,DAILY
+40,Manage shop operations in absence of Haris,JUNAID -SSE,SANOOF,,HARIS,AS PER REQ,DAILY
+41,Perform billing in absence of Haris,JUNAID -SSE,SANOOF,,HARIS,AS PER REQ,DAILY
+42,Match physical stock with ledger and report discrepancies,JUNAID -SSE,SANOOF,,HARIS,DAILY,DAILY
+43,Manage overall stock efficiently,HARIS,FAVAN,,YOUSUF,,DAILY
+44,Identify and handle dead stock,HARIS,FAVAN,,YOUSUF,,DAILY
+45,Match physical stock with ledger regularly,HARIS,FAVAN,,YOUSUF,,DAILY
+46,Supervise staff and assign duties,HARIS,YOUSUF,,YOUSUF,,DAILY
+47,Manage finance and cash flow,HARIS,FAVAN,,YOUSUF,,DAILY
+48,Follow up debtors ,HARIS,FAVAN,,YOUSUF,3 TIMES,DAILY
+49,Follow up creditors,HARIS,FAVAN,,YOUSUF,3 TIME ,DAILY
+50,Prepare quotations and close deals,HARIS,FAVAN,,YOUSUF,ON ARRIVAL,DAILY
+51,"Pay recurring shop expenses (electricity, WiFi, water, etc.)",HARIS,FAVAN,,YOUSUF,ON ARRIVAL,DAILY
+52,Disburse staff salaries,HARIS,YOUSUF,,YOUSUF,BEFORE NOON,1 DAY EVERY MONTH
+53,Execute marketing activities,HARIS,JUNAID,,YOUSUF,ON ARRIVAL,
+54,Manage sales and handle customers,HARIS,JUNAID,,YOUSUF,AS PER REQ,
+55,Create and issue purchase orders,HARIS,FAVAN,,YOUSUF,AS PER REQ,
+56,Provide directions for display management,YOUSUF,HARIS,,HARIS,,WEEKLY
+57,Define and implement finance policies,YOUSUF,HARIS,,HARIS,,QUARTERLY
+58,Plan and oversee marketing strategies,YOUSUF,HARIS,,HARIS,,MONTHLY
+59,Handle direct purchases from outside,YOUSUF,HARIS,,HARIS,AS PER REQ,
+60,Source new products,YOUSUF,HARIS,,HARIS,AS PER REQ,
+61,Guide and direct the sales team,YOUSUF,HARIS,,HARIS,,MONTHLY
+62,"Plan and execute marketing activities (electrician meets, hoardings, gifts)",YOUSUF,HARIS,,HARIS,,MONTHLY
+63,Conduct planned field marketing,YOUSUF,HARIS,,HARIS,,WEEKLY
+64,"Define vision, growth, and expansion strategies",YOUSUF,HARIS,,HARIS,,QUARTERLY
+65,Set sales targets,YOUSUF,HARIS,,HARIS,,MONTHLY
