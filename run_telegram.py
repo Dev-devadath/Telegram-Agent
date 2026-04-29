@@ -85,15 +85,48 @@ def main():
         logger.info(f"Webhook URL: {full_webhook_url}")
         logger.info(f"Listening on port: {port}")
 
-        app = build_application()
-        app.run_webhook(
-            listen="0.0.0.0",
-            port=port,
-            url_path=webhook_path,
-            secret_token=secret_token,
-            webhook_url=full_webhook_url,
-            allowed_updates=Update.ALL_TYPES,
-        )
+        import uvicorn
+        from fastapi import FastAPI, Request, Response
+        from contextlib import asynccontextmanager
+
+        app_ptb = build_application()
+
+        @asynccontextmanager
+        async def lifespan(_app: FastAPI):
+            # Set webhook on Telegram
+            await app_ptb.bot.set_webhook(
+                url=full_webhook_url,
+                secret_token=secret_token,
+                allowed_updates=Update.ALL_TYPES,
+            )
+            # Start the PTB application so it can process the update queue
+            async with app_ptb:
+                await app_ptb.start()
+                yield
+                await app_ptb.stop()
+                await app_ptb.bot.delete_webhook()
+
+        fastapi_app = FastAPI(lifespan=lifespan)
+
+        @fastapi_app.post(webhook_path)
+        async def telegram_webhook(request: Request):
+            # Verify secret token
+            secret_header = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+            if secret_header != secret_token:
+                return Response(status_code=403)
+                
+            data = await request.json()
+            update = Update.de_json(data=data, bot=app_ptb.bot)
+            await app_ptb.update_queue.put(update)
+            return Response(status_code=200)
+
+        @fastapi_app.get("/status")
+        @fastapi_app.get("/wake")
+        async def wake_status():
+            return {"status": "awake", "message": "Server is up and running."}
+
+        logger.info(f"Starting custom FastAPI server on port {port}")
+        uvicorn.run(fastapi_app, host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
