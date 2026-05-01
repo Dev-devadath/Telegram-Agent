@@ -9,8 +9,11 @@ Supports two modes:
 
 import os
 import sys
+import hashlib
+import hmac
 import logging
-import secrets
+import traceback
+from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 # Load env first — must happen before any app imports
@@ -26,10 +29,30 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
+# ── Track boot time for health checks ───────────────────────────────
+_boot_time: datetime | None = None
+_error_count: int = 0
+
+
+def _derive_webhook_secret(token: str) -> str:
+    """
+    Derive a deterministic webhook secret from the bot token.
+    This ensures the SAME secret survives process restarts on Render,
+    so Telegram's webhook calls never get a 403 mismatch.
+    """
+    return hmac.new(
+        key=b"tg-webhook-secret",
+        msg=token.encode(),
+        digestmod=hashlib.sha256,
+    ).hexdigest()[:43]  # URL-safe length, matches token_urlsafe(32)
+
 
 def main():
     """Start the Telegram bot."""
+    global _boot_time, _error_count
+
     from telegram import Update
+    from telegram.ext import Application
     from app.telegram.bot import build_application
     from app.telegram.registry import get_manager_chat_ids
 
@@ -57,6 +80,16 @@ def main():
     if use_polling:
         # ── Local development: polling mode ─────────────────────
         app = build_application()
+        # Add global error handler for polling mode too
+        async def _polling_error_handler(update, context):
+            global _error_count
+            _error_count += 1
+            logger.error(
+                f"Exception in handler (total errors: {_error_count}): "
+                f"{context.error}",
+                exc_info=context.error,
+            )
+        app.add_error_handler(_polling_error_handler)
         app.run_polling(allowed_updates=Update.ALL_TYPES)
     else:
         # ── Production: webhook mode (Render / Heroku) ──────────
@@ -74,9 +107,10 @@ def main():
             logger.error("   Or use --poll for local development.")
             return
 
-        # Generate a secret token for webhook security
+        # Deterministic secret: survives restarts without WEBHOOK_SECRET env var
         secret_token = os.environ.get(
-            "WEBHOOK_SECRET", secrets.token_urlsafe(32)
+            "WEBHOOK_SECRET",
+            _derive_webhook_secret(token),
         )
 
         webhook_path = "/webhook"
@@ -84,6 +118,7 @@ def main():
 
         logger.info(f"Webhook URL: {full_webhook_url}")
         logger.info(f"Listening on port: {port}")
+        logger.info(f"Webhook secret: {'(from env)' if os.environ.get('WEBHOOK_SECRET') else '(derived from token — deterministic)'}")
 
         import uvicorn
         from fastapi import FastAPI, Request, Response
@@ -91,18 +126,47 @@ def main():
 
         app_ptb = build_application()
 
+        # ── Global error handler: prevents silent crashes ───────
+        async def _error_handler(update, context):
+            global _error_count
+            _error_count += 1
+            logger.error(
+                f"Exception in handler (total errors: {_error_count}): "
+                f"{context.error}",
+                exc_info=context.error,
+            )
+            # Try to notify the user that something went wrong
+            if update and update.effective_chat:
+                try:
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text="⚠️ Something went wrong processing your request. Please try again.",
+                    )
+                except Exception:
+                    pass  # Don't let error notification crash the error handler
+
+        app_ptb.add_error_handler(_error_handler)
+
         @asynccontextmanager
         async def lifespan(_app: FastAPI):
-            # Set webhook on Telegram
+            global _boot_time
+            _boot_time = datetime.now(timezone.utc)
+
+            # Always (re-)set webhook on startup — ensures secret matches
+            logger.info("Setting webhook on Telegram...")
             await app_ptb.bot.set_webhook(
                 url=full_webhook_url,
                 secret_token=secret_token,
                 allowed_updates=Update.ALL_TYPES,
             )
+            logger.info("✅ Webhook set successfully")
+
             # Start the PTB application so it can process the update queue
             async with app_ptb:
                 await app_ptb.start()
+                logger.info("✅ PTB Application started — ready to process updates")
                 yield
+                logger.info("Shutting down PTB Application...")
                 await app_ptb.stop()
                 await app_ptb.bot.delete_webhook()
 
@@ -113,17 +177,42 @@ def main():
             # Verify secret token
             secret_header = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
             if secret_header != secret_token:
+                got = (secret_header or "None")[:8]
+                logger.warning(
+                    f"Webhook 403: secret mismatch "
+                    f"(got '{got}...' expected '{secret_token[:8]}...')"
+                )
                 return Response(status_code=403)
-                
-            data = await request.json()
-            update = Update.de_json(data=data, bot=app_ptb.bot)
-            await app_ptb.update_queue.put(update)
-            return Response(status_code=200)
+
+            try:
+                data = await request.json()
+                update = Update.de_json(data=data, bot=app_ptb.bot)
+                await app_ptb.update_queue.put(update)
+                return Response(status_code=200)
+            except Exception as e:
+                logger.error(f"Failed to process webhook update: {e}")
+                traceback.print_exc()
+                return Response(status_code=200)  # Return 200 to avoid Telegram retries
 
         @fastapi_app.get("/status")
         @fastapi_app.get("/wake")
         async def wake_status():
-            return {"status": "awake", "message": "Server is up and running."}
+            """Enhanced health endpoint with PTB state info."""
+            uptime = None
+            if _boot_time:
+                delta = datetime.now(timezone.utc) - _boot_time
+                uptime = str(delta).split(".")[0]  # Remove microseconds
+
+            return {
+                "status": "awake",
+                "message": "Server is up and running.",
+                "boot_time": _boot_time.isoformat() if _boot_time else None,
+                "uptime": uptime,
+                "errors_since_boot": _error_count,
+                "ptb_running": app_ptb.running,
+                "update_queue_size": app_ptb.update_queue.qsize()
+                    if hasattr(app_ptb, "update_queue") else None,
+            }
 
         logger.info(f"Starting custom FastAPI server on port {port}")
         uvicorn.run(fastapi_app, host="0.0.0.0", port=port)
