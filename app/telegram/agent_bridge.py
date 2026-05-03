@@ -4,6 +4,8 @@ Processes worker responses, manager confirmations, and generates reports.
 """
 
 import asyncio
+import logging
+import time as _time
 from google.adk.runners import InMemoryRunner
 from google.genai import types
 
@@ -22,20 +24,26 @@ from app.tools.performance_tools import (
 )
 from app.tools.salary_tools import get_all_salary_recommendations
 
+logger = logging.getLogger(__name__)
 
 # ── ADK Runner (shared) ────────────────────────────────────────────
 runner = InMemoryRunner(agent=manager_agent, app_name="household_tg")
 _sessions: dict[str, str] = {}
+_call_count: int = 0  # Track total ask_agent calls
 
 
 async def _get_session(user_id: str) -> str:
     """Get or create an ADK session for a user."""
     if user_id not in _sessions:
+        logger.info(f"[SESSION] Creating NEW session for user_id='{user_id}'")
         session = await runner.session_service.create_session(
             app_name="household_tg",
             user_id=user_id,
         )
         _sessions[user_id] = session.id
+        logger.info(f"[SESSION] Created session_id='{session.id}' for user_id='{user_id}'")
+    else:
+        logger.info(f"[SESSION] Reusing session_id='{_sessions[user_id]}' for user_id='{user_id}'")
     return _sessions[user_id]
 
 
@@ -43,24 +51,83 @@ async def ask_agent(user_id: str, message: str) -> str:
     """
     Send a message to the ADK manager agent and collect the text response.
     """
-    session_id = await _get_session(user_id)
-    parts: list[str] = []
+    global _call_count
+    _call_count += 1
+    call_num = _call_count
+    msg_preview = message[:80].replace('\n', ' ')
 
-    async for event in runner.run_async(
-        user_id=user_id,
-        session_id=session_id,
-        new_message=types.Content(
-            role="user",
-            parts=[types.Part(text=message)],
-        ),
-    ):
-        if not event.content or not event.content.parts:
-            continue
-        for part in event.content.parts:
-            if part.function_call or part.function_response:
+    logger.info(f"[AGENT #{call_num}] ── ask_agent START ──")
+    logger.info(f"[AGENT #{call_num}] user_id='{user_id}' message='{msg_preview}...'")
+
+    # Get session
+    t0 = _time.monotonic()
+    try:
+        session_id = await _get_session(user_id)
+        logger.info(f"[AGENT #{call_num}] Got session_id='{session_id}' ({_time.monotonic()-t0:.2f}s)")
+    except Exception as e:
+        logger.error(f"[AGENT #{call_num}] FAILED to get session: {type(e).__name__}: {e}")
+        raise
+
+    parts: list[str] = []
+    event_count = 0
+
+    # Run the agent
+    logger.info(f"[AGENT #{call_num}] Calling runner.run_async()...")
+    t1 = _time.monotonic()
+
+    try:
+        async for event in runner.run_async(
+            user_id=user_id,
+            session_id=session_id,
+            new_message=types.Content(
+                role="user",
+                parts=[types.Part(text=message)],
+            ),
+        ):
+            event_count += 1
+            elapsed = _time.monotonic() - t1
+
+            # Log every event with its type
+            author = getattr(event, 'author', '?')
+            has_content = bool(event.content and event.content.parts)
+            part_types = []
+            if has_content:
+                for p in event.content.parts:
+                    if p.function_call:
+                        part_types.append(f"fn_call({p.function_call.name})")
+                    elif p.function_response:
+                        part_types.append("fn_response")
+                    elif p.text:
+                        part_types.append(f"text({len(p.text)}ch)")
+                    else:
+                        part_types.append("other")
+
+            logger.info(
+                f"[AGENT #{call_num}] Event #{event_count} @ {elapsed:.1f}s | "
+                f"author={author} | parts={part_types or 'empty'}"
+            )
+
+            if not event.content or not event.content.parts:
                 continue
-            if part.text and part.text.strip():
-                parts.append(part.text.strip())
+            for part in event.content.parts:
+                if part.function_call or part.function_response:
+                    continue
+                if part.text and part.text.strip():
+                    parts.append(part.text.strip())
+
+        total_time = _time.monotonic() - t1
+        logger.info(
+            f"[AGENT #{call_num}] ── ask_agent DONE ── "
+            f"{event_count} events | {len(parts)} text parts | {total_time:.1f}s total"
+        )
+
+    except Exception as e:
+        total_time = _time.monotonic() - t1
+        logger.error(
+            f"[AGENT #{call_num}] ── ask_agent EXCEPTION after {total_time:.1f}s ── "
+            f"{type(e).__name__}: {e}"
+        )
+        raise
 
     return "\n".join(parts) if parts else "No response from agent."
 

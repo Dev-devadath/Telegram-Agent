@@ -187,6 +187,26 @@ def main():
             try:
                 data = await request.json()
                 update = Update.de_json(data=data, bot=app_ptb.bot)
+
+                # ── Debug: log every incoming update ──
+                update_type = "unknown"
+                chat_id = None
+                text_preview = ""
+                if update.message:
+                    update_type = "message"
+                    chat_id = update.message.chat_id
+                    text_preview = (update.message.text or "")[:40]
+                elif update.callback_query:
+                    update_type = "callback"
+                    chat_id = update.callback_query.message.chat_id if update.callback_query.message else None
+                    text_preview = update.callback_query.data or ""
+
+                queue_size = app_ptb.update_queue.qsize()
+                logger.info(
+                    f"[WEBHOOK] update_id={update.update_id} type={update_type} "
+                    f"chat={chat_id} text='{text_preview}' queue_size={queue_size}"
+                )
+
                 await app_ptb.update_queue.put(update)
                 return Response(status_code=200)
             except Exception as e:

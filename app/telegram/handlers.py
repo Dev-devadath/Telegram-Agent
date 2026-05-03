@@ -47,6 +47,7 @@ def _split_long_text(text: str, max_len: int = 4000) -> list[str]:
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start — let workers pick their role, greet the manager."""
     chat_id = update.effective_chat.id
+    logger.info(f"[CMD] /start from chat_id={chat_id}")
 
     # Check if this is the manager
     if is_manager(chat_id):
@@ -129,6 +130,7 @@ async def register_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show current tasks for a worker, or all registrations for manager."""
     chat_id = update.effective_chat.id
+    logger.info(f"[CMD] /status from chat_id={chat_id}")
 
     if is_manager(chat_id):
         # Show registration status
@@ -369,13 +371,18 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def manager_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle free-text messages from the manager — route to ADK agent."""
+    import time as _time
     chat_id = update.effective_chat.id
+    msg_text = (update.message.text or "")[:60]
+
+    logger.info(f"[HANDLER] ── message_handler ENTER ── chat_id={chat_id} text='{msg_text}...'")
 
     if not is_manager(chat_id):
         # Non-registered users or workers sending text
         worker_id = get_worker_by_chat(chat_id)
         if not worker_id:
             await update.message.reply_text("⚠️ Use /start to register first.")
+        logger.info(f"[HANDLER] Non-manager message from chat_id={chat_id}, skipping agent")
         return
 
     user_text = update.message.text.strip().lower()
@@ -383,18 +390,25 @@ async def manager_message_handler(update: Update, context: ContextTypes.DEFAULT_
     # Check if manager wants to broadcast
     broadcast_keywords = ["send updates", "broadcast", "send tasks", "notify workers", "trigger updates"]
     if any(kw in user_text for kw in broadcast_keywords):
+        logger.info(f"[HANDLER] Broadcast keyword detected, delegating to broadcast_command")
         await broadcast_command(update, context)
         return
 
     # Otherwise, send to ADK agent
+    logger.info(f"[HANDLER] Routing to ADK agent...")
     await update.message.reply_text("🤔 _Processing..._", parse_mode=ParseMode.MARKDOWN)
 
     # Snapshot task count before agent runs
     from app.store import TASKS
     tasks_before = len(TASKS)
 
+    t0 = _time.monotonic()
     try:
+        logger.info(f"[HANDLER] Calling agent_bridge.ask_agent('manager_tg', ...)...")
         response: str = await agent_bridge.ask_agent("manager_tg", update.message.text)
+        elapsed = _time.monotonic() - t0
+        logger.info(f"[HANDLER] agent returned in {elapsed:.1f}s, response={len(response)}ch")
+
         for chunk in _split_long_text(response):
             await update.message.reply_text(chunk)
 
@@ -408,8 +422,10 @@ async def manager_message_handler(update: Update, context: ContextTypes.DEFAULT_
                     text=f"📋 *New Task Assigned:*\n{task['description']}",
                     parse_mode=ParseMode.MARKDOWN,
                 )
+        logger.info(f"[HANDLER] ── message_handler DONE ── {elapsed:.1f}s")
     except Exception as e:
-        logger.error(f"Agent error: {e}")
+        elapsed = _time.monotonic() - t0
+        logger.error(f"[HANDLER] ── message_handler EXCEPTION after {elapsed:.1f}s ── {type(e).__name__}: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
 
 
