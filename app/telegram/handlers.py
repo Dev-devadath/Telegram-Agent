@@ -476,6 +476,7 @@ def get_all_handlers() -> list:
     if bot_mode == "shop":
         from app.telegram.shop_handlers import get_shop_handlers
         handlers = get_shop_handlers()
+        logger.info(f"[INIT] Shop mode: {len(handlers)} handlers registered")
     else:
         handlers = [
             CommandHandler("start", start_command),
@@ -489,10 +490,17 @@ def get_all_handlers() -> list:
             CallbackQueryHandler(manager_confirm_callback, pattern=r"^(confirm|reject)_"),
         ]
 
-    # Catch-all text handler must be LAST
-    catch_all = [
-        MessageHandler(filters.TEXT & ~filters.COMMAND, manager_message_handler),
-    ]
+    # Catch-all text handler — ONLY for resort mode (uses ADK agent / Groq).
+    # Shop mode has no ADK agent, so text messages should be ignored.
+    import os
+    bot_mode = os.environ.get("BOT_MODE", "resort").strip().lower()
+    if bot_mode != "shop":
+        handlers.append(
+            MessageHandler(filters.TEXT & ~filters.COMMAND, manager_message_handler),
+        )
+        logger.info("[INIT] Resort mode: catch-all agent handler registered")
+    else:
+        logger.info("[INIT] Shop mode: catch-all agent handler SKIPPED (no ADK agent)")
 
-    return handlers + catch_all
+    return handlers
 

@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 async def shopstart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /shopstart — let staff pick their role, greet the owner."""
     chat_id = update.effective_chat.id
+    logger.info(f"[SHOP-CMD] /start from chat_id={chat_id} is_owner={is_shop_owner(chat_id)}")
 
     # Check if this is the owner
     if is_shop_owner(chat_id):
@@ -101,6 +102,7 @@ async def shop_register_callback(update: Update, context: ContextTypes.DEFAULT_T
     """Handle staff selecting their role via inline button."""
     query = update.callback_query
     await query.answer()
+    logger.info(f"[SHOP-CB] register callback data={query.data} chat={query.message.chat_id}")
 
     staff_id = query.data.replace("shop_register_", "")
     chat_id = query.message.chat_id
@@ -130,6 +132,7 @@ async def shop_register_callback(update: Update, context: ContextTypes.DEFAULT_T
 async def shopstatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show current shop tasks for a staff member, or overview for owner."""
     chat_id = update.effective_chat.id
+    logger.info(f"[SHOP-CMD] /status from chat_id={chat_id} is_owner={is_shop_owner(chat_id)}")
 
     if is_shop_owner(chat_id):
         # Owner sees full overview
@@ -208,6 +211,7 @@ async def shopstatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def shopbroadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Owner manually triggers the morning broadcast."""
     chat_id = update.effective_chat.id
+    logger.info(f"[SHOP-CMD] /broadcast from chat_id={chat_id}")
 
     if not is_shop_owner(chat_id):
         await update.message.reply_text("⚠️ Only the owner can use /shopbroadcast.")
@@ -251,6 +255,7 @@ async def shop_done_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
 
     task_id = query.data.replace("shop_done_", "")
+    logger.info(f"[SHOP-CB] done callback task_id={task_id} chat={query.message.chat_id}")
     task = get_task_by_id(task_id)
 
     if not task:
@@ -292,6 +297,7 @@ async def shop_delay_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
 
     task_id = query.data.replace("shop_delay_", "")
+    logger.info(f"[SHOP-CB] delay callback task_id={task_id} chat={query.message.chat_id}")
     task = get_task_by_id(task_id)
 
     if not task:
@@ -327,6 +333,7 @@ async def shop_verify_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
 
     data = query.data  # "shop_verify_yes_<id>" or "shop_verify_no_<id>"
+    logger.info(f"[SHOP-CB] verify callback data={data} chat={query.message.chat_id}")
     confirmed = "shop_verify_yes_" in data
     task_id = data.replace("shop_verify_yes_", "").replace("shop_verify_no_", "")
 
@@ -350,6 +357,7 @@ async def shoptestmode_command(update: Update, context: ContextTypes.DEFAULT_TYP
     """Register the current user as owner + all staff for solo testing.
     Activates test mode: first task in 1 min, then every 2 min."""
     chat_id = update.effective_chat.id
+    logger.info(f"[SHOP-CMD] /testmode from chat_id={chat_id}")
 
     if not is_shop_owner(chat_id):
         await update.message.reply_text("⚠️ Only the owner can enable shop test mode.")
