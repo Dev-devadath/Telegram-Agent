@@ -168,7 +168,10 @@ def main():
                 yield
                 logger.info("Shutting down PTB Application...")
                 await app_ptb.stop()
-                await app_ptb.bot.delete_webhook()
+                # NOTE: Do NOT call delete_webhook() here!
+                # On Render rolling deploys, the old process shuts down AFTER
+                # the new one starts. Deleting the webhook here would nuke the
+                # webhook that the new process just registered, killing the bot.
 
         fastapi_app = FastAPI(lifespan=lifespan)
 
