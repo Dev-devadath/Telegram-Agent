@@ -38,21 +38,29 @@ async def send_verification_request(bot: Bot, task: dict):
     The verifier is determined by the task template's verifier_id field,
     which comes from the VERIFIER column in the CSV.
     """
-    verifier_id = task.get("verifier_id", "haris")
-    verifier_chat = _get_shop_staff_chat_id(verifier_id)
+    verifier_id = task.get("verifier_id", "owner")
 
-    if not verifier_chat:
-        logger.warning(f"Verifier {verifier_id} not registered, "
-                       f"falling back to owner for task {task['id']}")
-        # Fall back to owner
+    # Determine verifier chat and name
+    if verifier_id == "owner":
         owner_chats = _get_owner_chat_ids()
         if not owner_chats:
-            logger.error(f"No verifier or owner available for task {task['id']}")
+            logger.error(f"No owner available for verification of task {task['id']}")
             return
         verifier_chat = owner_chats[0]
+        verifier_name = "Owner"
+    else:
+        verifier_chat = _get_shop_staff_chat_id(verifier_id)
+        if not verifier_chat:
+            logger.warning(f"Verifier {verifier_id} not registered, "
+                           f"falling back to owner for task {task['id']}")
+            owner_chats = _get_owner_chat_ids()
+            if not owner_chats:
+                logger.error(f"No verifier or owner available for task {task['id']}")
+                return
+            verifier_chat = owner_chats[0]
+        verifier_name = SHOP_STAFF.get(verifier_id, {}).get("name", verifier_id)
 
     staff_name = SHOP_STAFF.get(task["staff_id"], {}).get("name", task["staff_id"])
-    verifier_name = SHOP_STAFF.get(verifier_id, {}).get("name", verifier_id)
 
     completed_time = task.get("completed_at")
     time_str = ""

@@ -139,8 +139,6 @@ async def shopstatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         lines = ["📊 *Shop Mode — Task Status Overview*\n"]
 
         for staff_id, staff in SHOP_STAFF.items():
-            if staff_id == "yousuf":
-                continue  # Verifier-only
 
             tasks = get_tasks_for_staff(staff_id)
             if not tasks:
@@ -163,7 +161,7 @@ async def shopstatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         # Registered staff count
         registered = get_registered_shop_staff()
-        total_staff = len([s for s in SHOP_STAFF if s != "yousuf"])
+        total_staff = len(SHOP_STAFF)
         lines.append(f"\n📱 Registered: {len(registered)}/{total_staff} staff")
 
         await update.message.reply_text(
@@ -364,7 +362,7 @@ async def shoptestmode_command(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     # Register this chat_id as all staff members
-    test_staff = ["sanoof", "favan", "junaid", "haris", "yousuf"]
+    test_staff = ["secretary", "driver", "cook"]
     registered = []
     for sid in test_staff:
         register_shop_staff(sid, chat_id)

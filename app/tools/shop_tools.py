@@ -20,7 +20,7 @@ def list_shop_tasks(staff_id: str = None, status: str = None) -> dict:
     List today's shop tasks, optionally filtered by staff and/or status.
 
     Args:
-        staff_id: Optional staff ID to filter by (sanoof, favan, junaid, haris).
+        staff_id: Optional staff ID to filter by (secretary, driver, cook).
         status: Optional status filter (assigned, in_progress, completed, rejected).
 
     Returns:
@@ -64,8 +64,6 @@ def get_shop_daily_summary() -> dict:
     }
 
     for staff_id, staff in SHOP_STAFF.items():
-        if staff_id == "yousuf":
-            continue
 
         tasks = get_tasks_for_staff(staff_id)
         if not tasks:
@@ -92,7 +90,7 @@ def get_shop_staff_performance(staff_id: str) -> dict:
     Get performance data for a specific shop staff member.
 
     Args:
-        staff_id: The staff ID (sanoof, favan, junaid, haris).
+        staff_id: The staff ID (secretary, driver, cook).
 
     Returns:
         dict with performance metrics.
@@ -139,8 +137,6 @@ def get_all_shop_staff_performance() -> dict:
     """
     results = {}
     for staff_id in SHOP_STAFF:
-        if staff_id == "yousuf":
-            continue
         results[staff_id] = get_shop_staff_performance(staff_id)
 
     return {"staff_performance": results}

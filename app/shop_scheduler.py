@@ -291,19 +291,6 @@ async def on_task_delayed(bot: Bot, task_id: str, context: ContextTypes.DEFAULT_
 
     staff_name = SHOP_STAFF.get(task["staff_id"], {}).get("name", task["staff_id"])
 
-    # Notify HARIS
-    haris_chat = _get_shop_staff_chat_id("haris")
-    if haris_chat:
-        await bot.send_message(
-            chat_id=haris_chat,
-            text=(
-                f"⏳ *Delay Notification*\n\n"
-                f"{staff_name} needs more time for:\n"
-                f"📋 {task['description']}"
-            ),
-            parse_mode=ParseMode.MARKDOWN,
-        )
-
     # Notify Owner
     for owner_chat in _get_owner_chat_ids():
         await bot.send_message(
@@ -358,19 +345,7 @@ async def _send_delay_reminder(context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.MARKDOWN,
         )
 
-    # Notify HARIS and Owner again
-    haris_chat = _get_shop_staff_chat_id("haris")
-    if haris_chat and haris_chat != staff_chat:
-        await context.bot.send_message(
-            chat_id=haris_chat,
-            text=(
-                f"🔔 *Reminder Alert*\n\n"
-                f"{staff_name}'s task is still pending after 30 min:\n"
-                f"📋 {task['description']}"
-            ),
-            parse_mode=ParseMode.MARKDOWN,
-        )
-
+    # Notify Owner again
     for owner_chat in _get_owner_chat_ids():
         await context.bot.send_message(
             chat_id=owner_chat,
@@ -391,8 +366,6 @@ async def morning_broadcast(bot: Bot):
     This is informational only — individual tasks are dispatched at trigger time.
     """
     for staff_id, staff in SHOP_STAFF.items():
-        if staff_id == "yousuf":
-            continue  # Verifier-only, no tasks
 
         staff_chat = _get_shop_staff_chat_id(staff_id)
         if not staff_chat:
@@ -446,7 +419,7 @@ async def morning_broadcast(bot: Bot):
     # Notify owner
     for owner_chat in _get_owner_chat_ids():
         total = len([t for t in get_automatable_templates() if _should_run_today(t)])
-        staff_count = len([s for s in SHOP_STAFF if s != "yousuf"])
+        staff_count = len(SHOP_STAFF)
         try:
             await bot.send_message(
                 chat_id=owner_chat,

@@ -1,17 +1,14 @@
 """
-Shop Mode — Data store for Quality GrowHack task management.
+Shop Mode — Data store for client task management.
 
-Staff registry, CSV parser, task templates, and runtime state.
-Runs alongside the existing household store (store.py).
+Staff registry, task templates, and runtime state.
+Tasks are defined inline (no CSV needed).
 """
 
-import csv
-import re
 import uuid
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Optional
 
 
@@ -29,43 +26,29 @@ SHOP_TEST_MODE: bool = False
 SHOP_TEST_TIME_OVERRIDES: dict[int, str] = {}  # task_number → "HH:MM" override
 
 
-# ── Shop Staff Registry ─────────────────────────────────────────────
+# ── Staff Registry ──────────────────────────────────────────────────
 # Owner is NOT in this registry — they are identified by SHOP_OWNER_CHAT_ID
 
 SHOP_STAFF: dict[str, dict] = {
-    "sanoof": {
-        "id": "sanoof",
-        "name": "Sanoof",
-        "role": "SE",
+    "secretary": {
+        "id": "secretary",
+        "name": "Secretary",
+        "role": "Secretary",
         "shop": 1,
         "performance_score": 80.0,
     },
-    "favan": {
-        "id": "favan",
-        "name": "Favan",
-        "role": "Accounts",
-        "shop": 2,
-        "performance_score": 80.0,
-    },
-    "junaid": {
-        "id": "junaid",
-        "name": "Junaid",
-        "role": "SSE",
+    "driver": {
+        "id": "driver",
+        "name": "Driver",
+        "role": "Driver",
         "shop": 1,
         "performance_score": 80.0,
     },
-    "haris": {
-        "id": "haris",
-        "name": "Haris",
-        "role": "Manager",
-        "shop": "both",
-        "performance_score": 80.0,
-    },
-    "yousuf": {
-        "id": "yousuf",
-        "name": "Yousuf",
-        "role": "Director",
-        "shop": "verifier_only",
+    "cook": {
+        "id": "cook",
+        "name": "Cook",
+        "role": "Cook",
+        "shop": 1,
         "performance_score": 80.0,
     },
 }
@@ -73,45 +56,37 @@ SHOP_STAFF: dict[str, dict] = {
 # ── Staff name → ID mapping (case-insensitive lookup) ────────────────
 
 _STAFF_NAME_MAP: dict[str, str] = {
-    "sanoof": "sanoof",
-    "sanoof - se": "sanoof",
-    "sanoof-se": "sanoof",
-    "favan": "favan",
-    "favan-acounts": "favan",
-    "favan-accounts": "favan",
-    "junaid": "junaid",
-    "junaid -sse": "junaid",
-    "junaid-sse": "junaid",
-    "haris": "haris",
-    "yousuf": "yousuf",
+    "secretary": "secretary",
+    "driver": "driver",
+    "cook": "cook",
 }
 
 
 def resolve_staff_id(name: str) -> Optional[str]:
-    """Resolve a CSV staff name to a staff_id."""
+    """Resolve a staff name to a staff_id."""
     return _STAFF_NAME_MAP.get(name.strip().lower())
 
 
-# ── Task Template (parsed from CSV) ─────────────────────────────────
+# ── Task Template ───────────────────────────────────────────────────
 
 @dataclass
 class ShopTaskTemplate:
-    """A task template parsed from one row of the CSV."""
-    task_number: int              # 1-65 from CSV
-    description: str              # "Open Shop 1 at 8:00 AM"
-    staff_id: str                 # "sanoof"
-    verifier_id: str              # "junaid"
-    admin_id: str                 # "haris"
+    """A task template representing a scheduled check/question."""
+    task_number: int              # Unique task number
+    description: str              # The question/check to ask
+    staff_id: str                 # "secretary", "driver", "cook"
+    verifier_id: str              # Owner verifies all
+    admin_id: str                 # Owner
     trigger_time: Optional[str]   # "08:00" or None (24h format)
     trigger_type: str             # "fixed_time" | "sequential" | "event" | "manual"
-    depends_on: Optional[int]     # Task number this depends on (AFTER T10 → 10)
-    repeat: str                   # "daily" | "monthly" | "weekly" | "quarterly"
-    repeat_day: Optional[int]     # 30 for "30th of every month"
-    is_customer_task: bool        # True = skipped from automation
-    is_excluded: bool             # True for YOUSUF's tasks (rows 56-65)
+    depends_on: Optional[int]     # Task number this depends on
+    repeat: str                   # "daily"
+    repeat_day: Optional[int]     # None for daily
+    is_customer_task: bool        # False for all
+    is_excluded: bool             # False for all
 
 
-# All task templates loaded from CSV
+# All task templates
 SHOP_TASK_TEMPLATES: list[ShopTaskTemplate] = []
 
 
@@ -132,237 +107,164 @@ def now_iso() -> str:
     return now_ist().isoformat()
 
 
-# ── Time Parsing ────────────────────────────────────────────────────
+# ── Inline Task Definitions ─────────────────────────────────────────
 
-def _normalize_time(raw: str) -> Optional[str]:
-    """
-    Convert messy CSV time strings to 24h "HH:MM" format.
+_TASK_DEFINITIONS = [
+    # ── Secretary Tasks ──────────────────────────────────────────
+    {
+        "task_number": 1,
+        "description": "Are today's contents ready?",
+        "staff_id": "secretary",
+        "trigger_time": "10:00",
+    },
+    {
+        "task_number": 2,
+        "description": "Was the social media post uploaded successfully?",
+        "staff_id": "secretary",
+        "trigger_time": "19:00",
+    },
+    {
+        "task_number": 3,
+        "description": "Have the daily schedules been prepared?",
+        "staff_id": "secretary",
+        "trigger_time": "09:30",
+    },
+    {
+        "task_number": 4,
+        "description": "Was the 10:30 AM medicine intake done?",
+        "staff_id": "secretary",
+        "trigger_time": "10:30",
+    },
+    {
+        "task_number": 5,
+        "description": "Was the 10:00 PM medicine intake done?",
+        "staff_id": "secretary",
+        "trigger_time": "22:00",
+    },
 
-    Examples:
-        "8.00 AM"     → "08:00"
-        "8:00 AM"     → "08:00"
-        "7.45 PM"     → "19:45"
-        "BEFORE 12 PM" → "11:30"  (approximate)
-        "AFTERN NOON"  → "13:00"
-        "AFTER NOON"   → "13:00"
-        "AFTERNOON"    → "13:00"
-        None / ""      → None
-    """
-    if not raw:
-        return None
+    # ── Driver Tasks ─────────────────────────────────────────────
+    {
+        "task_number": 6,
+        "description": "Did you punch in/clock in at 9:00 AM?",
+        "staff_id": "driver",
+        "trigger_time": "09:00",
+    },
+    {
+        "task_number": 7,
+        "description": "Was the full vehicle wash completed today?",
+        "staff_id": "driver",
+        "trigger_time": "09:30",
+    },
+    {
+        "task_number": 8,
+        "description": "Has the interior of the car been cleaned and detailed?",
+        "staff_id": "driver",
+        "trigger_time": "10:00",
+    },
+    {
+        "task_number": 9,
+        "description": "Were all scheduled purchases for today finalized?",
+        "staff_id": "driver",
+        "trigger_time": "17:00",
+    },
+    {
+        "task_number": 10,
+        "description": "Have the car accessories and equipment been checked?",
+        "staff_id": "driver",
+        "trigger_time": "17:30",
+    },
+    {
+        "task_number": 11,
+        "description": "Did tomorrow's breakfast ingredients are there?",
+        "staff_id": "driver",
+        "trigger_time": "21:00",
+    },
 
-    raw = raw.strip().upper()
-
-    # Skip non-time values
-    skip_patterns = [
-        "ON ARRIVAL", "AS PER REQ", "DAILY", "DIALY",
-        "PURCHASE ARRIVAL", "WHENEVE", "3 TIME", "3TIME",
-    ]
-    for pattern in skip_patterns:
-        if pattern in raw:
-            return None
-
-    # Handle AFTER T* (sequential dependency, not a time)
-    if re.match(r"AFTER\s*T\d+", raw):
-        return None
-
-    # Handle "AFTERN NOON", "AFTER NOON", "AFTERNOON"
-    if "NOON" in raw and "BEFORE" not in raw:
-        return "13:00"
-
-    # Handle "BEFORE 12 PM" → approximate as 11:30
-    before_match = re.match(r"BEFORE\s+(\d{1,2})\s*(AM|PM)", raw)
-    if before_match:
-        hour = int(before_match.group(1))
-        ampm = before_match.group(2)
-        if ampm == "PM" and hour != 12:
-            hour += 12
-        elif ampm == "AM" and hour == 12:
-            hour = 0
-        # 30 min before as approximation
-        if hour > 0:
-            return f"{hour - 1:02d}:30"
-        return "23:30"
-
-    # Handle "AFTER 8 PM" → "20:00"
-    after_time_match = re.match(r"AFTER\s+(\d{1,2})\s*(AM|PM)", raw)
-    if after_time_match:
-        hour = int(after_time_match.group(1))
-        ampm = after_time_match.group(2)
-        if ampm == "PM" and hour != 12:
-            hour += 12
-        elif ampm == "AM" and hour == 12:
-            hour = 0
-        return f"{hour:02d}:00"
-
-    # Handle standard time: "8.00 AM", "8:00 AM", "8.10 AM"
-    time_match = re.match(r"(\d{1,2})[.:](\d{2})\s*(AM|PM)", raw)
-    if time_match:
-        hour = int(time_match.group(1))
-        minute = int(time_match.group(2))
-        ampm = time_match.group(3)
-        if ampm == "PM" and hour != 12:
-            hour += 12
-        elif ampm == "AM" and hour == 12:
-            hour = 0
-        return f"{hour:02d}:{minute:02d}"
-
-    return None
-
-
-def _parse_trigger(time_str: str) -> tuple[str, Optional[int]]:
-    """
-    Determine trigger type and dependency from the TIME column.
-
-    Returns:
-        (trigger_type, depends_on_task_number)
-    """
-    if not time_str:
-        return ("manual", None)
-
-    raw = time_str.strip().upper()
-
-    # Sequential: "AFTER T10", "AFTEER T30", "AFTERT11"
-    seq_match = re.match(r"AFTE+R\s*T(\d+)", raw)
-    if seq_match:
-        return ("sequential", int(seq_match.group(1)))
-
-    # "NEXT DAY T38" — treat as sequential for simplicity
-    next_match = re.match(r"NEXT\s+DAY\s+T(\d+)", raw)
-    if next_match:
-        return ("sequential", int(next_match.group(1)))
-
-    # Event-driven
-    event_patterns = ["ON ARRIVAL", "AS PER REQ", "PURCHASE ARRIVAL", "WHENEVE"]
-    for pat in event_patterns:
-        if pat in raw:
-            return ("event", None)
-
-    # If we can parse a time, it's a fixed-time task
-    normalized = _normalize_time(raw)
-    if normalized:
-        return ("fixed_time", None)
-
-    # Fallback
-    return ("manual", None)
-
-
-def _parse_repeat(raw: str) -> tuple[str, Optional[int]]:
-    """
-    Parse the REPEAT column.
-
-    Returns:
-        (repeat_frequency, specific_day_or_none)
-    """
-    if not raw:
-        return ("daily", None)
-
-    raw = raw.strip().upper()
-
-    if "MONTH" in raw:
-        # "30th of Everymonth" or "1 DAY EVERY MONTH"
-        day_match = re.search(r"(\d+)", raw)
-        day = int(day_match.group(1)) if day_match else 1
-        return ("monthly", day)
-
-    if "WEEK" in raw:
-        return ("weekly", None)
-
-    if "QUARTER" in raw:
-        return ("quarterly", None)
-
-    return ("daily", None)
-
-
-# Customer-facing task keywords (these are skipped from automation)
-_CUSTOMER_KEYWORDS = [
-    "handle customer interaction",
-    "explain products to customer",
-    "close sales effectively",
-    "handle customer interactions",
-    "manage sales and handle customers",
+    # ── Cook Tasks ───────────────────────────────────────────────
+    {
+        "task_number": 12,
+        "description": "Were the Vegetable Salad and Cucumber Juice prepared?",
+        "staff_id": "cook",
+        "trigger_time": "08:00",
+    },
+    {
+        "task_number": 13,
+        "description": "Were the Porridge and Curd (Yogurt) prepared?",
+        "staff_id": "cook",
+        "trigger_time": "09:00",
+    },
+    {
+        "task_number": 14,
+        "description": "Was the Salted Lemon Water prepared?",
+        "staff_id": "cook",
+        "trigger_time": "11:00",
+    },
+    {
+        "task_number": 15,
+        "description": "Was the Fruit Salad prepared?",
+        "staff_id": "cook",
+        "trigger_time": "12:00",
+    },
+    {
+        "task_number": 16,
+        "description": "Was the Protein Powder Shake prepared?",
+        "staff_id": "cook",
+        "trigger_time": "13:00",
+    },
+    {
+        "task_number": 17,
+        "description": "Were the Bread, Cheese, Poached Egg, and Water prepared?",
+        "staff_id": "cook",
+        "trigger_time": "14:00",
+    },
+    {
+        "task_number": 18,
+        "description": "Was the Gooseberry Juice prepared?",
+        "staff_id": "cook",
+        "trigger_time": "16:00",
+    },
+    {
+        "task_number": 19,
+        "description": "Was the Avocado Shake prepared?",
+        "staff_id": "cook",
+        "trigger_time": "17:00",
+    },
+    {
+        "task_number": 20,
+        "description": "Was the Vegetable Salad with Protein (per rotation) prepared?",
+        "staff_id": "cook",
+        "trigger_time": "19:00",
+    },
 ]
 
 
-def _is_customer_task(description: str) -> bool:
-    """Check if a task description is customer-facing."""
-    desc_lower = description.lower()
-    return any(kw in desc_lower for kw in _CUSTOMER_KEYWORDS)
-
-
-# ── CSV Loader ──────────────────────────────────────────────────────
+# ── Task Loader (inline, no CSV) ────────────────────────────────────
 
 def load_shop_tasks(csv_path: Optional[str] = None) -> list[ShopTaskTemplate]:
     """
-    Parse the Quality GrowHack CSV and populate SHOP_TASK_TEMPLATES.
-
-    Skips:
-    - Rows without a task number (unnumbered rows, lines 24-29)
-    - YOUSUF's tasks (rows 56-65) — he's verifier-only
+    Build task templates from inline definitions.
+    The csv_path parameter is kept for API compatibility but is ignored.
 
     Returns the list of loaded templates.
     """
-
-    if csv_path is None:
-        csv_path = str(Path(__file__).parent.parent / "Quality GrowHack - Sheet1.csv")
-
-    if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"Shop task CSV not found: {csv_path}")
-
     templates: list[ShopTaskTemplate] = []
 
-    with open(csv_path, "r", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-
-        for row in reader:
-            # Skip rows without a task number (unnumbered rows)
-            task_num_raw = row.get("", "").strip()
-            if not task_num_raw or not task_num_raw.isdigit():
-                continue
-
-            task_number = int(task_num_raw)
-            description = row.get("TASK", "").strip()
-            if not description:
-                continue
-
-            # Resolve staff IDs
-            staff_id = resolve_staff_id(row.get("STAFF", ""))
-            verifier_id = resolve_staff_id(row.get("VERIFIER", ""))
-            admin_id = resolve_staff_id(row.get("ADMIN", ""))
-
-            if not staff_id:
-                continue  # Can't assign without a valid staff member
-
-            # Check if this is YOUSUF's task (he's verifier-only)
-            is_excluded = (staff_id == "yousuf")
-
-            # Parse time and trigger
-            time_raw = row.get("TIME", "").strip()
-            trigger_type, depends_on = _parse_trigger(time_raw)
-            trigger_time = _normalize_time(time_raw)
-
-            # Parse repeat
-            repeat_raw = row.get("REPEAT", "").strip()
-            repeat, repeat_day = _parse_repeat(repeat_raw)
-
-            # Check if customer-facing
-            is_customer = _is_customer_task(description)
-
-            template = ShopTaskTemplate(
-                task_number=task_number,
-                description=description,
-                staff_id=staff_id,
-                verifier_id=verifier_id or "haris",  # Default verifier
-                admin_id=admin_id or "haris",
-                trigger_time=trigger_time,
-                trigger_type=trigger_type,
-                depends_on=depends_on,
-                repeat=repeat,
-                repeat_day=repeat_day,
-                is_customer_task=is_customer,
-                is_excluded=is_excluded,
-            )
-            templates.append(template)
+    for task_def in _TASK_DEFINITIONS:
+        template = ShopTaskTemplate(
+            task_number=task_def["task_number"],
+            description=task_def["description"],
+            staff_id=task_def["staff_id"],
+            verifier_id="owner",      # Owner verifies all tasks
+            admin_id="owner",
+            trigger_time=task_def.get("trigger_time"),
+            trigger_type="fixed_time" if task_def.get("trigger_time") else "manual",
+            depends_on=task_def.get("depends_on"),
+            repeat="daily",
+            repeat_day=None,
+            is_customer_task=False,
+            is_excluded=False,
+        )
+        templates.append(template)
 
     SHOP_TASK_TEMPLATES.clear()
     SHOP_TASK_TEMPLATES.extend(templates)
