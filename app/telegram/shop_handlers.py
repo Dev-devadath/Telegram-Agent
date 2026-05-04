@@ -1,16 +1,18 @@
 """
 Shop Mode — Telegram command and callback handlers.
 
-Handles /shopstart, /shopstatus, /shopbroadcast, task done/delay responses,
+Handles /shopstart, /shopstatus, /shopbroadcast, task done/delay/no responses,
 and verification confirm/reject callbacks.
 """
 
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ForceReply
 from telegram.ext import (
     ContextTypes,
     CommandHandler,
     CallbackQueryHandler,
+    MessageHandler,
+    filters,
 )
 from telegram.constants import ParseMode
 
@@ -411,6 +413,103 @@ async def shoptestmode_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # ═══════════════════════════════════════════════════════════════════
+# Task No — Staff says task was NOT done, asks for reason
+# ═══════════════════════════════════════════════════════════════════
+
+# chat_id → task_id mapping for pending "No" reasons
+_PENDING_NO_REASONS: dict[int, str] = {}
+
+
+async def shop_no_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Staff taps 'No' on a task — ask them for a reason."""
+    query = update.callback_query
+    await query.answer()
+
+    task_id = query.data.replace("shop_no_", "")
+    chat_id = query.message.chat_id
+    logger.info(f"[SHOP-CB] no callback task_id={task_id} chat={chat_id}")
+    task = get_task_by_id(task_id)
+
+    if not task:
+        await query.edit_message_text("⚠️ Task not found.")
+        return
+
+    if task["status"] in ("completed", "rejected"):
+        await query.edit_message_text(
+            f"ℹ️ This task was already {task['status']}:\n"
+            f"📋 {task['description']}"
+        )
+        return
+
+    # Store pending reason request
+    _PENDING_NO_REASONS[chat_id] = task_id
+
+    # Update the original message
+    await query.edit_message_text(
+        f"❌ *Not done:*\n"
+        f"📋 {task['description']}\n\n"
+        f"_Please type your reason below:_",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+    # Send a ForceReply to prompt the user
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="📝 Why was this task not completed? Please type your reason:",
+        reply_markup=ForceReply(selective=False),
+    )
+
+
+async def shop_no_reason_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Capture the reason text after staff tapped 'No' on a task."""
+    chat_id = update.effective_chat.id
+
+    # Only process if this user has a pending "No" reason
+    if chat_id not in _PENDING_NO_REASONS:
+        return
+
+    task_id = _PENDING_NO_REASONS.pop(chat_id)
+    reason = update.message.text.strip()
+    logger.info(f"[SHOP-NO] Reason received for task_id={task_id}: {reason[:50]}")
+
+    task = get_task_by_id(task_id)
+    if not task:
+        await update.message.reply_text("⚠️ Task not found.")
+        return
+
+    # Mark as rejected with reason
+    task["status"] = "rejected"
+    task["worker_response"] = False
+    task["rejection_reason"] = reason
+    task["completed_at"] = now_iso()
+
+    staff_name = SHOP_STAFF.get(task["staff_id"], {}).get("name", task["staff_id"])
+
+    # Confirm to staff
+    await update.message.reply_text(
+        f"✅ Your reason has been recorded and sent to the owner.\n\n"
+        f"📋 {task['description']}\n"
+        f"💬 Reason: {reason}",
+    )
+
+    # Notify Owner with reason
+    for owner_chat in get_shop_owner_chat_ids():
+        try:
+            await context.bot.send_message(
+                chat_id=owner_chat,
+                text=(
+                    f"❌ *Task Not Done*\n\n"
+                    f"👤 *Staff:* {staff_name}\n"
+                    f"📋 *Task:* {task['description']}\n"
+                    f"💬 *Reason:* {reason}"
+                ),
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception as e:
+            logger.error(f"Failed to notify owner about No reason: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Handler list
 # ═══════════════════════════════════════════════════════════════════
 
@@ -427,6 +526,9 @@ def get_shop_handlers() -> list:
         CallbackQueryHandler(shop_register_callback, pattern=r"^shop_register_"),
         CallbackQueryHandler(shop_done_callback, pattern=r"^shop_done_"),
         CallbackQueryHandler(shop_delay_callback, pattern=r"^shop_delay_"),
+        CallbackQueryHandler(shop_no_callback, pattern=r"^shop_no_"),
         CallbackQueryHandler(shop_verify_callback, pattern=r"^shop_verify_(yes|no)_"),
+        # Text handler for "No" reason capture (must be after command handlers)
+        MessageHandler(filters.TEXT & ~filters.COMMAND, shop_no_reason_handler),
     ]
 

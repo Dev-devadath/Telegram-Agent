@@ -46,18 +46,18 @@ def _setup_shop_scheduler(app: Application):
         from app.shop_store import load_shop_tasks, IST
         from app.shop_scheduler import schedule_shop_tasks, morning_broadcast_job, daily_reset_job
 
-        # Load task templates from CSV
+        # Load task templates
         try:
             templates = load_shop_tasks()
-            logger.info(f"🏪 Shop Mode: Loaded {len(templates)} task templates from CSV")
+            logger.info(f"🏪 Shop Mode: Loaded {len(templates)} task templates")
         except FileNotFoundError:
-            logger.warning("🏪 Shop Mode: CSV not found, shop tasks not loaded")
+            logger.warning("🏪 Shop Mode: Task definitions not found, tasks not loaded")
             return
         except Exception as e:
             logger.error(f"🏪 Shop Mode: Failed to load tasks: {e}")
             return
 
-        # Schedule individual task jobs at their CSV times (normal mode)
+        # Schedule individual task jobs at their trigger times (normal mode)
         preview = schedule_shop_tasks(app.job_queue, test_mode=False)
         logger.info(f"🏪 Shop Mode: {len(preview)} task jobs scheduled")
 

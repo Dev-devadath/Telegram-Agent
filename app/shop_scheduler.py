@@ -239,10 +239,15 @@ async def dispatch_task(bot: Bot, template: ShopTaskTemplate) -> dict | None:
         f"_Tap below when done:_"
     )
 
-    buttons = [[
-        InlineKeyboardButton("✅ Done", callback_data=f"shop_done_{task['id']}"),
-        InlineKeyboardButton("⏳ Need More Time", callback_data=f"shop_delay_{task['id']}"),
-    ]]
+    buttons = [
+        [
+            InlineKeyboardButton("✅ Done", callback_data=f"shop_done_{task['id']}"),
+            InlineKeyboardButton("⏳ Need More Time", callback_data=f"shop_delay_{task['id']}"),
+        ],
+        [
+            InlineKeyboardButton("❌ No", callback_data=f"shop_no_{task['id']}"),
+        ],
+    ]
 
     try:
         await bot.send_message(
@@ -328,10 +333,15 @@ async def _send_delay_reminder(context: ContextTypes.DEFAULT_TYPE):
     staff_name = SHOP_STAFF.get(staff_id, {}).get("name", staff_id)
 
     if staff_chat:
-        buttons = [[
-            InlineKeyboardButton("✅ Done", callback_data=f"shop_done_{task_id}"),
-            InlineKeyboardButton("⏳ Need More Time", callback_data=f"shop_delay_{task_id}"),
-        ]]
+        buttons = [
+            [
+                InlineKeyboardButton("✅ Done", callback_data=f"shop_done_{task_id}"),
+                InlineKeyboardButton("⏳ Need More Time", callback_data=f"shop_delay_{task_id}"),
+            ],
+            [
+                InlineKeyboardButton("❌ No", callback_data=f"shop_no_{task_id}"),
+            ],
+        ]
 
         await context.bot.send_message(
             chat_id=staff_chat,
