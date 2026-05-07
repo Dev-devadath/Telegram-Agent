@@ -1,4 +1,7 @@
 import logging
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from telegram import Update
 from telegram.ext import (
@@ -34,6 +37,25 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Management bot is running.\n")
+
+    def log_message(self, format: str, *args: object) -> None:
+        logger.debug("Health server: " + format, *args)
+
+
+def start_health_server() -> None:
+    port = int(os.getenv("PORT", "10000"))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    logger.info("Health server listening on port %s", port)
+
+
 async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
@@ -55,6 +77,7 @@ def main() -> None:
         raise RuntimeError("Set BOT_TOKEN in .env before running the bot.")
 
     ensure_data_file()
+    start_health_server()
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start_handler))
