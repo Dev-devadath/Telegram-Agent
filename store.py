@@ -30,6 +30,7 @@ def _default_data() -> dict[str, Any]:
         "users": [],
         "tasks": [],
         "task_runs": [],
+        "firings": [],
     }
     if ADMIN_TELEGRAM_ID:
         data["users"].append(
@@ -48,6 +49,18 @@ def _default_data() -> dict[str, Any]:
 
 def _sync_admin_user(data: dict[str, Any]) -> bool:
     changed = False
+    for key, default_value in {
+        "settings": {"test_mode": False, "test_telegram_id": None},
+        "roles": ["Driver", "Cook", "Cleaner", "Security"],
+        "users": [],
+        "tasks": [],
+        "task_runs": [],
+        "firings": [],
+    }.items():
+        if key not in data:
+            data[key] = default_value
+            changed = True
+
     users = data.get("users", [])
 
     if ADMIN_TELEGRAM_ID:
@@ -160,6 +173,14 @@ def telegram_has_role(telegram_id: int, role: str) -> bool:
     return any(user.get("role") == role for user in users)
 
 
+def get_user_by_telegram_and_role(telegram_id: int, role: str) -> dict[str, Any] | None:
+    users = list_users_by_telegram(telegram_id)
+    for user in users:
+        if user.get("role") == role:
+            return user
+    return None
+
+
 def get_user_by_id(user_id: str) -> dict[str, Any] | None:
     data = load_data()
     for user in data["users"]:
@@ -186,6 +207,22 @@ def list_users_by_role(role: str) -> list[dict[str, Any]]:
         user
         for user in data["users"]
         if user.get("role") == role and user.get("active", True)
+    ]
+
+
+def list_workers_under_manager(manager_id: str) -> list[dict[str, Any]]:
+    data = load_data()
+    managed_roles = {
+        task.get("worker_role")
+        for task in data["tasks"]
+        if task.get("manager_id") == manager_id and task.get("active", True)
+    }
+    return [
+        user
+        for user in data["users"]
+        if user.get("role") == "worker"
+        and user.get("worker_role") in managed_roles
+        and user.get("active", True)
     ]
 
 
@@ -302,6 +339,7 @@ def add_task(
     manager_id: str,
     time_hhmm: str,
     recurrence: str = "daily",
+    weekday: int | None = None,
 ) -> dict[str, Any]:
     data = load_data()
     if worker_role not in data["roles"]:
@@ -318,12 +356,58 @@ def add_task(
         "manager_id": manager_id,
         "time": time_hhmm,
         "recurrence": recurrence,
+        "weekday": weekday,
         "active": True,
         "created_at": _now_iso(),
     }
     data["tasks"].append(task)
     save_data(data)
     return task
+
+
+def fire_worker(worker_id: str, manager_id: str, reason: str) -> dict[str, Any]:
+    data = load_data()
+    worker_idx = None
+    worker = None
+    for idx, user in enumerate(data["users"]):
+        if (
+            user.get("id") == worker_id
+            and user.get("role") == "worker"
+            and user.get("active", True)
+        ):
+            worker_idx = idx
+            worker = user
+            break
+
+    if worker_idx is None or worker is None:
+        raise ValueError("Active worker not found.")
+
+    managed_roles = {
+        task.get("worker_role")
+        for task in data["tasks"]
+        if task.get("manager_id") == manager_id and task.get("active", True)
+    }
+    if worker.get("worker_role") not in managed_roles:
+        raise ValueError("This worker is not under this manager.")
+
+    fired_at = _now_iso()
+    firing = {
+        "id": _new_id("f"),
+        "worker_id": worker_id,
+        "worker_name": worker.get("name"),
+        "worker_role": worker.get("worker_role"),
+        "worker_telegram_id": worker.get("telegram_id"),
+        "manager_id": manager_id,
+        "reason": reason.strip(),
+        "created_at": fired_at,
+    }
+    data["firings"].append(firing)
+    data["users"][worker_idx]["active"] = False
+    data["users"][worker_idx]["fired_at"] = fired_at
+    data["users"][worker_idx]["fired_by_manager_id"] = manager_id
+    data["users"][worker_idx]["fired_reason"] = reason.strip()
+    save_data(data)
+    return firing
 
 
 def list_active_tasks() -> list[dict[str, Any]]:
@@ -337,6 +421,16 @@ def get_task_by_id(task_id: str) -> dict[str, Any] | None:
         if task["id"] == task_id:
             return task
     return None
+
+
+def update_task(task_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+    data = load_data()
+    for idx, task in enumerate(data["tasks"]):
+        if task["id"] == task_id:
+            data["tasks"][idx] = {**task, **updates}
+            save_data(data)
+            return data["tasks"][idx]
+    raise ValueError("Task not found.")
 
 
 def add_task_run(task: dict[str, Any], scheduled_for: str) -> dict[str, Any]:

@@ -28,6 +28,15 @@ def _parse_time(value: str) -> time:
     return time(hour=int(hour), minute=int(minute), tzinfo=_get_scheduler_tz())
 
 
+def _next_run_datetime(value: str) -> datetime:
+    parsed_time = _parse_time(value)
+    now = datetime.now(_get_scheduler_tz())
+    run_at = datetime.combine(now.date(), parsed_time, tzinfo=_get_scheduler_tz())
+    if run_at <= now:
+        run_at += timedelta(days=1)
+    return run_at
+
+
 def _task_keyboard(run_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -50,16 +59,26 @@ def schedule_task_job(application: Application, task: dict) -> None:
     run_time = _parse_time(task["time"])
     for existing in application.job_queue.get_jobs_by_name(f"{TASK_JOB_PREFIX}{task['id']}"):
         existing.schedule_removal()
-    application.job_queue.run_daily(
-        daily_task_callback,
-        time=run_time,
-        data={"task_id": task["id"]},
-        name=f"{TASK_JOB_PREFIX}{task['id']}",
-    )
+    recurrence = task.get("recurrence", "daily")
+    if recurrence == "once":
+        application.job_queue.run_once(
+            daily_task_callback,
+            when=_next_run_datetime(task["time"]),
+            data={"task_id": task["id"]},
+            name=f"{TASK_JOB_PREFIX}{task['id']}",
+        )
+    else:
+        application.job_queue.run_daily(
+            daily_task_callback,
+            time=run_time,
+            data={"task_id": task["id"]},
+            name=f"{TASK_JOB_PREFIX}{task['id']}",
+        )
     logger.info(
-        "Scheduled task job task_id=%s at %s (tz=%s)",
+        "Scheduled task job task_id=%s at %s recurrence=%s (tz=%s)",
         task["id"],
         task["time"],
+        recurrence,
         run_time.tzinfo,
     )
 
@@ -85,10 +104,23 @@ async def daily_task_callback(context: CallbackContext) -> None:
     if not task or not task.get("active", True):
         logger.info("Skipped firing task_id=%s (missing/inactive).", task_id)
         return
+    if task.get("recurrence") == "weekly":
+        expected_weekday = task.get("weekday")
+        current_weekday = datetime.now(_get_scheduler_tz()).weekday()
+        if expected_weekday is not None and expected_weekday != current_weekday:
+            logger.info(
+                "Skipped weekly task_id=%s on weekday=%s expected=%s",
+                task_id,
+                current_weekday,
+                expected_weekday,
+            )
+            return
     scheduled_for = datetime.utcnow().replace(microsecond=0).isoformat()
     logger.info("Firing task_id=%s scheduled_for=%s", task_id, scheduled_for)
     run = store.add_task_run(task, scheduled_for=scheduled_for)
     await _send_run_to_worker(context, run)
+    if task.get("recurrence") == "once":
+        store.update_task(task_id, {"active": False})
 
 
 async def extension_task_callback(context: CallbackContext) -> None:

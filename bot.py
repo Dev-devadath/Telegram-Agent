@@ -15,7 +15,14 @@ from telegram.ext import (
 
 from config import BOT_TOKEN
 from handlers.admin import admin_callback, admin_panel, admin_text_handler
-from handlers.manager import manager_verify_callback, report_callback, report_handler
+from handlers.manager import (
+    manager_action_callback,
+    manager_panel,
+    manager_text_handler,
+    manager_verify_callback,
+    report_callback,
+    report_handler,
+)
 from handlers.start import (
     REGISTER_ROLE_PREFIX,
     register_role_callback,
@@ -63,6 +70,7 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "Commands:\n"
         "/start - Register or open your workspace\n"
         "/admin - Open admin panel\n"
+        "/manager - Open manager panel\n"
         "/report - View reports (manager/admin)\n"
         "/help - Show this help"
     )
@@ -82,12 +90,14 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("admin", admin_panel))
+    app.add_handler(CommandHandler("manager", manager_panel))
     app.add_handler(CommandHandler("report", report_handler))
     app.add_handler(CommandHandler("help", help_handler))
 
     app.add_handler(CallbackQueryHandler(register_role_callback, pattern=f"^{REGISTER_ROLE_PREFIX}"))
     app.add_handler(CallbackQueryHandler(task_response_callback, pattern=r"^task_(yes|no|extend):"))
     app.add_handler(CallbackQueryHandler(manager_verify_callback, pattern=r"^(verify|reject):"))
+    app.add_handler(CallbackQueryHandler(manager_action_callback, pattern=r"^manager:"))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^admin:"))
     app.add_handler(CallbackQueryHandler(report_callback, pattern=r"^report_(role|period):"))
 
@@ -97,12 +107,16 @@ def main() -> None:
         group=0,
     )
     app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, no_reason_handler),
+        MessageHandler(filters.TEXT & ~filters.COMMAND, manager_text_handler),
         group=1,
     )
     app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, registration_name_handler),
+        MessageHandler(filters.TEXT & ~filters.COMMAND, no_reason_handler),
         group=2,
+    )
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, registration_name_handler),
+        group=3,
     )
 
     app.add_error_handler(error_handler)

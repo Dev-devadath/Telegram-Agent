@@ -19,6 +19,18 @@ ADMIN_RESET_CANCEL = f"{ADMIN_PREFIX}reset_cancel"
 ADMIN_REMOVE_ROLE_PREFIX = f"{ADMIN_PREFIX}remove_role:"
 ADMIN_TASK_ROLE_PREFIX = f"{ADMIN_PREFIX}task_role:"
 ADMIN_TASK_MANAGER_PREFIX = f"{ADMIN_PREFIX}task_manager:"
+ADMIN_TASK_RECURRENCE_PREFIX = f"{ADMIN_PREFIX}task_recurrence:"
+ADMIN_TASK_WEEKDAY_PREFIX = f"{ADMIN_PREFIX}task_weekday:"
+
+WEEKDAYS = [
+    ("Monday", 0),
+    ("Tuesday", 1),
+    ("Wednesday", 2),
+    ("Thursday", 3),
+    ("Friday", 4),
+    ("Saturday", 5),
+    ("Sunday", 6),
+]
 
 
 def _is_admin(telegram_id: int) -> bool:
@@ -133,8 +145,57 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         draft = context.user_data.get("task_draft", {})
         draft["manager_id"] = manager_id
         context.user_data["task_draft"] = draft
+        keyboard = [
+            [
+                InlineKeyboardButton("Once", callback_data=f"{ADMIN_TASK_RECURRENCE_PREFIX}once"),
+                InlineKeyboardButton("Daily", callback_data=f"{ADMIN_TASK_RECURRENCE_PREFIX}daily"),
+            ],
+            [
+                InlineKeyboardButton("Weekly", callback_data=f"{ADMIN_TASK_RECURRENCE_PREFIX}weekly"),
+            ],
+        ]
+        await query.edit_message_text(
+            "Select repeat option:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data.startswith(ADMIN_TASK_RECURRENCE_PREFIX):
+        recurrence = data.replace(ADMIN_TASK_RECURRENCE_PREFIX, "", 1)
+        draft = context.user_data.get("task_draft", {})
+        draft["recurrence"] = recurrence
+        context.user_data["task_draft"] = draft
+        if recurrence == "weekly":
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        label,
+                        callback_data=f"{ADMIN_TASK_WEEKDAY_PREFIX}{weekday}",
+                    )
+                ]
+                for label, weekday in WEEKDAYS
+            ]
+            await query.edit_message_text(
+                "Select weekly day:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
         context.user_data["admin_state"] = "awaiting_task_time"
-        await query.edit_message_text("Send task time in 24h format HH:MM (example 10:30).")
+        await query.edit_message_text(
+            "Send task time in 24h format HH:MM (example 10:30)."
+        )
+        return
+
+    if data.startswith(ADMIN_TASK_WEEKDAY_PREFIX):
+        weekday = int(data.replace(ADMIN_TASK_WEEKDAY_PREFIX, "", 1))
+        draft = context.user_data.get("task_draft", {})
+        draft["weekday"] = weekday
+        context.user_data["task_draft"] = draft
+        context.user_data["admin_state"] = "awaiting_task_time"
+        await query.edit_message_text(
+            "Send task time in 24h format HH:MM (example 10:30)."
+        )
         return
 
     if data == ADMIN_REPORT:
@@ -272,10 +333,13 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 worker_role=draft["worker_role"],
                 manager_id=draft["manager_id"],
                 time_hhmm=draft["time"],
-                recurrence="daily",
+                recurrence=draft.get("recurrence", "daily"),
+                weekday=draft.get("weekday"),
             )
             scheduler.schedule_task_job(context.application, task)
-            await update.message.reply_text("Task added and scheduled.")
+            await update.message.reply_text(
+                f"Task added and scheduled ({task['recurrence']})."
+            )
         except ValueError as exc:
             await update.message.reply_text(f"Failed to add task: {exc}")
         finally:
