@@ -27,6 +27,7 @@ def _default_data() -> dict[str, Any]:
             "test_telegram_id": None,
         },
         "roles": ["Driver", "Cook", "Cleaner", "Security"],
+        "role_managers": {},
         "users": [],
         "tasks": [],
         "task_runs": [],
@@ -52,6 +53,7 @@ def _sync_admin_user(data: dict[str, Any]) -> bool:
     for key, default_value in {
         "settings": {"test_mode": False, "test_telegram_id": None},
         "roles": ["Driver", "Cook", "Cleaner", "Security"],
+        "role_managers": {},
         "users": [],
         "tasks": [],
         "task_runs": [],
@@ -62,6 +64,12 @@ def _sync_admin_user(data: dict[str, Any]) -> bool:
             changed = True
 
     users = data.get("users", [])
+    role_managers = data.get("role_managers", {})
+    for role in data.get("roles", []):
+        if role not in role_managers:
+            role_managers[role] = None
+            changed = True
+    data["role_managers"] = role_managers
 
     if ADMIN_TELEGRAM_ID:
         # Replace known placeholder admin entry with configured admin ID.
@@ -212,11 +220,15 @@ def list_users_by_role(role: str) -> list[dict[str, Any]]:
 
 def list_workers_under_manager(manager_id: str) -> list[dict[str, Any]]:
     data = load_data()
+    owned_roles = {
+        role for role, owner_id in data.get("role_managers", {}).items() if owner_id == manager_id
+    }
     managed_roles = {
         task.get("worker_role")
         for task in data["tasks"]
         if task.get("manager_id") == manager_id and task.get("active", True)
     }
+    managed_roles.update(owned_roles)
     return [
         user
         for user in data["users"]
@@ -230,14 +242,29 @@ def list_roles() -> list[str]:
     return load_data()["roles"]
 
 
-def add_role(role_name: str) -> None:
+def list_roles_for_manager(manager_id: str) -> list[str]:
+    data = load_data()
+    role_managers = data.get("role_managers", {})
+    return [
+        role
+        for role in data["roles"]
+        if role_managers.get(role) == manager_id
+    ]
+
+
+def add_role(role_name: str, manager_id: str | None = None) -> None:
     role_name = role_name.strip()
     if not role_name:
         raise ValueError("Role cannot be empty.")
     data = load_data()
     if role_name in data["roles"]:
         raise ValueError("Role already exists.")
+    if manager_id:
+        manager = get_user_by_id(manager_id)
+        if not manager or manager.get("role") != "manager":
+            raise ValueError("Invalid manager.")
     data["roles"].append(role_name)
+    data.setdefault("role_managers", {})[role_name] = manager_id
     save_data(data)
 
 
@@ -249,6 +276,7 @@ def remove_role(role_name: str) -> None:
     if claimed:
         raise ValueError("Role is already claimed by a worker.")
     data["roles"] = [role for role in data["roles"] if role != role_name]
+    data.setdefault("role_managers", {}).pop(role_name, None)
     save_data(data)
 
 
@@ -347,6 +375,9 @@ def add_task(
     manager = get_user_by_id(manager_id)
     if not manager or manager.get("role") != "manager":
         raise ValueError("Invalid manager.")
+    role_manager_id = data.get("role_managers", {}).get(worker_role)
+    if role_manager_id and role_manager_id != manager_id:
+        raise ValueError("This role belongs to another manager.")
 
     task = {
         "id": _new_id("t"),
@@ -387,6 +418,11 @@ def fire_worker(worker_id: str, manager_id: str, reason: str) -> dict[str, Any]:
         for task in data["tasks"]
         if task.get("manager_id") == manager_id and task.get("active", True)
     }
+    managed_roles.update(
+        role
+        for role, owner_id in data.get("role_managers", {}).items()
+        if owner_id == manager_id
+    )
     if worker.get("worker_role") not in managed_roles:
         raise ValueError("This worker is not under this manager.")
 
@@ -408,6 +444,77 @@ def fire_worker(worker_id: str, manager_id: str, reason: str) -> dict[str, Any]:
     data["users"][worker_idx]["fired_reason"] = reason.strip()
     save_data(data)
     return firing
+
+
+def remove_manager(manager_id: str) -> dict[str, Any]:
+    data = load_data()
+    removed_at = _now_iso()
+    manager_idx = None
+    manager = None
+    for idx, user in enumerate(data["users"]):
+        if (
+            user.get("id") == manager_id
+            and user.get("role") == "manager"
+            and user.get("active", True)
+        ):
+            manager_idx = idx
+            manager = user
+            break
+
+    if manager_idx is None or manager is None:
+        raise ValueError("Active manager not found.")
+
+    owned_roles = {
+        role
+        for role, owner_id in data.get("role_managers", {}).items()
+        if owner_id == manager_id
+    }
+    task_roles = {
+        task.get("worker_role")
+        for task in data["tasks"]
+        if task.get("manager_id") == manager_id and task.get("active", True)
+    }
+    affected_roles = owned_roles | task_roles
+
+    removed_workers: list[dict[str, Any]] = []
+    disabled_tasks = 0
+    for idx, user in enumerate(data["users"]):
+        if (
+            user.get("role") == "worker"
+            and user.get("worker_role") in affected_roles
+            and user.get("active", True)
+        ):
+            data["users"][idx]["active"] = False
+            data["users"][idx]["removed_at"] = removed_at
+            data["users"][idx]["removed_by_admin_reason"] = "Manager removed"
+            removed_workers.append(user)
+
+    for idx, task in enumerate(data["tasks"]):
+        if (
+            task.get("manager_id") == manager_id
+            or task.get("worker_role") in affected_roles
+        ) and task.get("active", True):
+            data["tasks"][idx]["active"] = False
+            data["tasks"][idx]["disabled_at"] = removed_at
+            data["tasks"][idx]["disabled_reason"] = "Manager removed"
+            disabled_tasks += 1
+
+    data["users"][manager_idx]["active"] = False
+    data["users"][manager_idx]["removed_at"] = removed_at
+    data["users"][manager_idx]["removed_by_admin_reason"] = "Removed by admin"
+
+    data["roles"] = [role for role in data["roles"] if role not in owned_roles]
+    for role in owned_roles:
+        data.setdefault("role_managers", {}).pop(role, None)
+
+    removal = {
+        "manager": manager,
+        "removed_workers": removed_workers,
+        "removed_roles": sorted(owned_roles),
+        "disabled_tasks": disabled_tasks,
+    }
+    save_data(data)
+    return removal
 
 
 def list_active_tasks() -> list[dict[str, Any]]:

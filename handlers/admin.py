@@ -10,6 +10,7 @@ ADMIN_PREFIX = "admin:"
 ADMIN_ADD_ROLE = f"{ADMIN_PREFIX}add_role"
 ADMIN_REMOVE_ROLE = f"{ADMIN_PREFIX}remove_role"
 ADMIN_ADD_MANAGER = f"{ADMIN_PREFIX}add_manager"
+ADMIN_REMOVE_MANAGER = f"{ADMIN_PREFIX}remove_manager"
 ADMIN_ADD_TASK = f"{ADMIN_PREFIX}add_task"
 ADMIN_REPORT = f"{ADMIN_PREFIX}report"
 ADMIN_TESTMODE = f"{ADMIN_PREFIX}testmode"
@@ -17,6 +18,8 @@ ADMIN_RESET = f"{ADMIN_PREFIX}reset"
 ADMIN_RESET_CONFIRM = f"{ADMIN_PREFIX}reset_confirm"
 ADMIN_RESET_CANCEL = f"{ADMIN_PREFIX}reset_cancel"
 ADMIN_REMOVE_ROLE_PREFIX = f"{ADMIN_PREFIX}remove_role:"
+ADMIN_REMOVE_MANAGER_PREFIX = f"{ADMIN_PREFIX}remove_manager:"
+ADMIN_REMOVE_MANAGER_CONFIRM_PREFIX = f"{ADMIN_PREFIX}remove_manager_confirm:"
 ADMIN_TASK_ROLE_PREFIX = f"{ADMIN_PREFIX}task_role:"
 ADMIN_TASK_MANAGER_PREFIX = f"{ADMIN_PREFIX}task_manager:"
 ADMIN_TASK_RECURRENCE_PREFIX = f"{ADMIN_PREFIX}task_recurrence:"
@@ -42,6 +45,7 @@ def _panel_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("Add Role", callback_data=ADMIN_ADD_ROLE)],
         [InlineKeyboardButton("Remove Role", callback_data=ADMIN_REMOVE_ROLE)],
         [InlineKeyboardButton("Add Manager", callback_data=ADMIN_ADD_MANAGER)],
+        [InlineKeyboardButton("Remove Manager", callback_data=ADMIN_REMOVE_MANAGER)],
         [InlineKeyboardButton("Add Task", callback_data=ADMIN_ADD_TASK)],
         [InlineKeyboardButton("Reports", callback_data=ADMIN_REPORT)],
         [InlineKeyboardButton("Toggle Test Mode", callback_data=ADMIN_TESTMODE)],
@@ -103,6 +107,80 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if data == ADMIN_ADD_MANAGER:
         context.user_data["admin_state"] = "awaiting_manager_telegram_id"
         await query.edit_message_text("Send manager Telegram ID.")
+        return
+
+    if data == ADMIN_REMOVE_MANAGER:
+        managers = store.list_users_by_role("manager")
+        if not managers:
+            await query.edit_message_text("No active managers available.")
+            return
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    f"{manager['name']} ({manager['telegram_id']})",
+                    callback_data=f"{ADMIN_REMOVE_MANAGER_PREFIX}{manager['id']}",
+                )
+            ]
+            for manager in managers
+        ]
+        await query.edit_message_text(
+            "Select manager to remove:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data.startswith(ADMIN_REMOVE_MANAGER_PREFIX):
+        manager_id = data.replace(ADMIN_REMOVE_MANAGER_PREFIX, "", 1)
+        manager = store.get_user_by_id(manager_id)
+        if not manager or manager.get("role") != "manager":
+            await query.edit_message_text("Manager not found.")
+            return
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "Confirm Remove",
+                    callback_data=f"{ADMIN_REMOVE_MANAGER_CONFIRM_PREFIX}{manager_id}",
+                )
+            ],
+            [InlineKeyboardButton("Cancel", callback_data=ADMIN_RESET_CANCEL)],
+        ]
+        await query.edit_message_text(
+            f"Remove manager {manager['name']}?\n"
+            "All workers and active tasks under this manager will be removed.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data.startswith(ADMIN_REMOVE_MANAGER_CONFIRM_PREFIX):
+        manager_id = data.replace(ADMIN_REMOVE_MANAGER_CONFIRM_PREFIX, "", 1)
+        try:
+            removal = store.remove_manager(manager_id)
+        except ValueError as exc:
+            await query.edit_message_text(f"Failed to remove manager: {exc}")
+            return
+
+        scheduler.clear_all_task_jobs(context.application)
+        scheduler.register_all_jobs(context.application)
+
+        for worker in removal["removed_workers"]:
+            try:
+                await context.bot.send_message(
+                    chat_id=worker["telegram_id"],
+                    text=(
+                        "Your manager has been removed.\n"
+                        f"Role: {worker.get('worker_role')}\n"
+                        "You have been logged out from this worker role."
+                    ),
+                )
+            except Exception:
+                pass
+
+        await query.edit_message_text(
+            f"Manager removed: {removal['manager']['name']}\n"
+            f"Workers removed: {len(removal['removed_workers'])}\n"
+            f"Roles removed: {len(removal['removed_roles'])}\n"
+            f"Tasks disabled: {removal['disabled_tasks']}"
+        )
         return
 
     if data == ADMIN_ADD_TASK:

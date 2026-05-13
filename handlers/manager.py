@@ -12,6 +12,7 @@ REJECT_PREFIX = "reject:"
 REPORT_ROLE_PREFIX = "report_role:"
 REPORT_PERIOD_PREFIX = "report_period:"
 MANAGER_PREFIX = "manager:"
+MANAGER_ADD_ROLE = f"{MANAGER_PREFIX}add_role"
 MANAGER_ADD_TASK = f"{MANAGER_PREFIX}add_task"
 MANAGER_FIRE_WORKER = f"{MANAGER_PREFIX}fire_worker"
 MANAGER_FIRE_WORKER_PREFIX = f"{MANAGER_PREFIX}fire_worker:"
@@ -49,6 +50,7 @@ async def manager_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     keyboard = [
+        [InlineKeyboardButton("Add Role", callback_data=MANAGER_ADD_ROLE)],
         [InlineKeyboardButton("Add Task", callback_data=MANAGER_ADD_TASK)],
         [InlineKeyboardButton("Fire Worker", callback_data=MANAGER_FIRE_WORKER)],
         [InlineKeyboardButton("Reports", callback_data=f"{REPORT_ROLE_PREFIX}all")],
@@ -113,10 +115,17 @@ async def manager_action_callback(update: Update, context: ContextTypes.DEFAULT_
     await query.answer()
     data = query.data
 
+    if data == MANAGER_ADD_ROLE:
+        context.user_data["manager_state"] = "awaiting_role_name"
+        await query.edit_message_text("Send the new role name to add under you.")
+        return
+
     if data == MANAGER_ADD_TASK:
-        roles = store.list_roles()
+        roles = store.list_roles_for_manager(manager["id"])
         if not roles:
-            await query.edit_message_text("No worker roles available. Ask admin to add roles.")
+            await query.edit_message_text(
+                "No roles are under you yet. Use /manager -> Add Role first."
+            )
             return
 
         context.user_data["manager_state"] = "awaiting_task_title"
@@ -253,7 +262,14 @@ async def manager_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         draft = context.user_data.get("manager_task_draft", {})
         draft["description"] = text
         context.user_data["manager_task_draft"] = draft
-        roles = store.list_roles()
+        roles = store.list_roles_for_manager(manager["id"])
+        if not roles:
+            await update.message.reply_text(
+                "No roles are under you yet. Use /manager -> Add Role first."
+            )
+            context.user_data.pop("manager_state", None)
+            context.user_data.pop("manager_task_draft", None)
+            return
         keyboard = [
             [InlineKeyboardButton(role, callback_data=f"{MANAGER_TASK_ROLE_PREFIX}{role}")]
             for role in roles
@@ -262,6 +278,17 @@ async def manager_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             "Select role for this task:",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
+        return
+
+    if state == "awaiting_role_name":
+        try:
+            store.add_role(text, manager_id=manager["id"])
+        except ValueError as exc:
+            await update.message.reply_text(f"Failed to add role: {exc}")
+        else:
+            await update.message.reply_text(f"Role added under you: {text}")
+        finally:
+            context.user_data.pop("manager_state", None)
         return
 
     if state == "awaiting_task_time":
