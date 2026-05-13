@@ -15,6 +15,7 @@ from telegram.ext import (
 
 from config import BOT_TOKEN
 from handlers.admin import admin_callback, admin_panel, admin_text_handler
+from handlers.demo import demo_callback, demo_handler, demo_reason_handler
 from handlers.manager import (
     manager_action_callback,
     manager_panel,
@@ -69,6 +70,7 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(
         "Commands:\n"
         "/start - Register or open your workspace\n"
+        "/demo - Try a quick self-guided demo\n"
         "/admin - Open admin panel\n"
         "/manager - Open manager panel\n"
         "/report - View reports (manager/admin)\n"
@@ -89,12 +91,14 @@ def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start_handler))
+    app.add_handler(CommandHandler("demo", demo_handler))
     app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(CommandHandler("manager", manager_panel))
     app.add_handler(CommandHandler("report", report_handler))
     app.add_handler(CommandHandler("help", help_handler))
 
     app.add_handler(CallbackQueryHandler(register_role_callback, pattern=f"^{REGISTER_ROLE_PREFIX}"))
+    app.add_handler(CallbackQueryHandler(demo_callback, pattern=r"^demo_(yes|no|verify|reject)$"))
     app.add_handler(CallbackQueryHandler(task_response_callback, pattern=r"^task_(yes|no|extend):"))
     app.add_handler(CallbackQueryHandler(manager_verify_callback, pattern=r"^(verify|reject):"))
     app.add_handler(CallbackQueryHandler(manager_action_callback, pattern=r"^manager:"))
@@ -117,6 +121,10 @@ def main() -> None:
     app.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, registration_name_handler),
         group=3,
+    )
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, demo_reason_handler),
+        group=4,
     )
 
     app.add_error_handler(error_handler)
