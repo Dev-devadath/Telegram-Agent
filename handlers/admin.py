@@ -10,6 +10,7 @@ ADMIN_PREFIX = "admin:"
 ADMIN_ADD_ROLE = f"{ADMIN_PREFIX}add_role"
 ADMIN_REMOVE_ROLE = f"{ADMIN_PREFIX}remove_role"
 ADMIN_ADD_MANAGER = f"{ADMIN_PREFIX}add_manager"
+ADMIN_LIST_MANAGERS = f"{ADMIN_PREFIX}list_managers"
 ADMIN_REMOVE_MANAGER = f"{ADMIN_PREFIX}remove_manager"
 ADMIN_ADD_TASK = f"{ADMIN_PREFIX}add_task"
 ADMIN_REPORT = f"{ADMIN_PREFIX}report"
@@ -45,6 +46,7 @@ def _panel_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("Add Role", callback_data=ADMIN_ADD_ROLE)],
         [InlineKeyboardButton("Remove Role", callback_data=ADMIN_REMOVE_ROLE)],
         [InlineKeyboardButton("Add Manager", callback_data=ADMIN_ADD_MANAGER)],
+        [InlineKeyboardButton("List Managers", callback_data=ADMIN_LIST_MANAGERS)],
         [InlineKeyboardButton("Remove Manager", callback_data=ADMIN_REMOVE_MANAGER)],
         [InlineKeyboardButton("Add Task", callback_data=ADMIN_ADD_TASK)],
         [InlineKeyboardButton("Reports", callback_data=ADMIN_REPORT)],
@@ -109,22 +111,28 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.edit_message_text("Send manager Telegram ID.")
         return
 
-    if data == ADMIN_REMOVE_MANAGER:
+    if data in {ADMIN_LIST_MANAGERS, ADMIN_REMOVE_MANAGER}:
         managers = store.list_users_by_role("manager")
         if not managers:
             await query.edit_message_text("No active managers available.")
             return
+        manager_lines = [
+            f"{idx}. {manager['name']} ({manager['telegram_id']})"
+            for idx, manager in enumerate(managers, start=1)
+        ]
         keyboard = [
             [
                 InlineKeyboardButton(
-                    f"{manager['name']} ({manager['telegram_id']})",
+                    f"Remove {manager['name']}",
                     callback_data=f"{ADMIN_REMOVE_MANAGER_PREFIX}{manager['id']}",
                 )
             ]
             for manager in managers
         ]
         await query.edit_message_text(
-            "Select manager to remove:",
+            "Active managers:\n"
+            + "\n".join(manager_lines)
+            + "\n\nSelect a manager below to remove:",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return

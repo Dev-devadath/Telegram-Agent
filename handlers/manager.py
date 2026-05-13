@@ -41,6 +41,16 @@ def _get_manager_user(telegram_id: int) -> dict | None:
     return store.get_user_by_telegram_and_role(telegram_id, "manager")
 
 
+def manager_menu_markup() -> InlineKeyboardMarkup:
+    keyboard = [
+        [InlineKeyboardButton("Add Role", callback_data=MANAGER_ADD_ROLE)],
+        [InlineKeyboardButton("Add Task", callback_data=MANAGER_ADD_TASK)],
+        [InlineKeyboardButton("Fire Worker", callback_data=MANAGER_FIRE_WORKER)],
+        [InlineKeyboardButton("Reports", callback_data=f"{REPORT_ROLE_PREFIX}all")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
 async def manager_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_user or not update.message:
         return
@@ -49,15 +59,9 @@ async def manager_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("Only managers can use this command.")
         return
 
-    keyboard = [
-        [InlineKeyboardButton("Add Role", callback_data=MANAGER_ADD_ROLE)],
-        [InlineKeyboardButton("Add Task", callback_data=MANAGER_ADD_TASK)],
-        [InlineKeyboardButton("Fire Worker", callback_data=MANAGER_FIRE_WORKER)],
-        [InlineKeyboardButton("Reports", callback_data=f"{REPORT_ROLE_PREFIX}all")],
-    ]
     await update.message.reply_text(
         "Manager panel:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=manager_menu_markup(),
     )
 
 
