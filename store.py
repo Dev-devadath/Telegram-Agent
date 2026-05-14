@@ -522,6 +522,32 @@ def list_active_tasks() -> list[dict[str, Any]]:
     return [task for task in data["tasks"] if task.get("active", True)]
 
 
+def list_tasks_for_manager(manager_id: str) -> list[dict[str, Any]]:
+    data = load_data()
+    tasks: list[dict[str, Any]] = []
+    for task in data["tasks"]:
+        if task.get("manager_id") != manager_id or not task.get("active", True):
+            continue
+        worker = next(
+            (
+                user
+                for user in data["users"]
+                if user.get("role") == "worker"
+                and user.get("worker_role") == task.get("worker_role")
+                and user.get("active", True)
+            ),
+            None,
+        )
+        tasks.append(
+            {
+                **task,
+                "worker_name": worker.get("name") if worker else "Unassigned",
+                "worker_telegram_id": worker.get("telegram_id") if worker else None,
+            }
+        )
+    return tasks
+
+
 def get_task_by_id(task_id: str) -> dict[str, Any] | None:
     data = load_data()
     for task in data["tasks"]:
@@ -537,6 +563,24 @@ def update_task(task_id: str, updates: dict[str, Any]) -> dict[str, Any]:
             data["tasks"][idx] = {**task, **updates}
             save_data(data)
             return data["tasks"][idx]
+    raise ValueError("Task not found.")
+
+
+def deactivate_manager_task(task_id: str, manager_id: str) -> dict[str, Any]:
+    data = load_data()
+    for idx, task in enumerate(data["tasks"]):
+        if task["id"] != task_id:
+            continue
+        if task.get("manager_id") != manager_id:
+            raise ValueError("Task does not belong to this manager.")
+        if not task.get("active", True):
+            raise ValueError("Task is already deleted.")
+
+        data["tasks"][idx]["active"] = False
+        data["tasks"][idx]["deleted_at"] = _now_iso()
+        data["tasks"][idx]["deleted_by_manager_id"] = manager_id
+        save_data(data)
+        return data["tasks"][idx]
     raise ValueError("Task not found.")
 
 

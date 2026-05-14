@@ -14,8 +14,11 @@ REPORT_PERIOD_PREFIX = "report_period:"
 MANAGER_PREFIX = "manager:"
 MANAGER_ADD_ROLE = f"{MANAGER_PREFIX}add_role"
 MANAGER_ADD_TASK = f"{MANAGER_PREFIX}add_task"
+MANAGER_LIST_TASKS = f"{MANAGER_PREFIX}list_tasks"
 MANAGER_FIRE_WORKER = f"{MANAGER_PREFIX}fire_worker"
 MANAGER_FIRE_WORKER_PREFIX = f"{MANAGER_PREFIX}fire_worker:"
+MANAGER_DELETE_TASK_PREFIX = f"{MANAGER_PREFIX}delete_task:"
+MANAGER_DELETE_TASK_CONFIRM_PREFIX = f"{MANAGER_PREFIX}delete_task_confirm:"
 MANAGER_TASK_ROLE_PREFIX = f"{MANAGER_PREFIX}task_role:"
 MANAGER_TASK_RECURRENCE_PREFIX = f"{MANAGER_PREFIX}task_recurrence:"
 MANAGER_TASK_WEEKDAY_PREFIX = f"{MANAGER_PREFIX}task_weekday:"
@@ -45,6 +48,7 @@ def manager_menu_markup() -> InlineKeyboardMarkup:
     keyboard = [
         [InlineKeyboardButton("Add Role", callback_data=MANAGER_ADD_ROLE)],
         [InlineKeyboardButton("Add Task", callback_data=MANAGER_ADD_TASK)],
+        [InlineKeyboardButton("Task List", callback_data=MANAGER_LIST_TASKS)],
         [InlineKeyboardButton("Fire Worker", callback_data=MANAGER_FIRE_WORKER)],
         [InlineKeyboardButton("Reports", callback_data=f"{REPORT_ROLE_PREFIX}all")],
     ]
@@ -137,6 +141,10 @@ async def manager_action_callback(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text("Send task title.")
         return
 
+    if data == MANAGER_LIST_TASKS:
+        await _send_manager_task_list(query, manager["id"])
+        return
+
     if data == MANAGER_FIRE_WORKER:
         workers = store.list_workers_under_manager(manager["id"])
         if not workers:
@@ -216,6 +224,45 @@ async def manager_action_callback(update: Update, context: ContextTypes.DEFAULT_
         )
         return
 
+    if data.startswith(MANAGER_DELETE_TASK_CONFIRM_PREFIX):
+        task_id = data.replace(MANAGER_DELETE_TASK_CONFIRM_PREFIX, "", 1)
+        try:
+            task = store.deactivate_manager_task(task_id, manager["id"])
+        except ValueError as exc:
+            await query.edit_message_text(f"Failed to delete task: {exc}")
+            return
+
+        scheduler.clear_all_task_jobs(context.application)
+        scheduler.register_all_jobs(context.application)
+        await query.edit_message_text(f"Task deleted: {task['title']}")
+        return
+
+    if data.startswith(MANAGER_DELETE_TASK_PREFIX):
+        task_id = data.replace(MANAGER_DELETE_TASK_PREFIX, "", 1)
+        task = store.get_task_by_id(task_id)
+        if not task or not task.get("active", True) or task.get("manager_id") != manager["id"]:
+            await query.edit_message_text("Task not found or already deleted.")
+            return
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "Confirm Delete",
+                    callback_data=f"{MANAGER_DELETE_TASK_CONFIRM_PREFIX}{task_id}",
+                )
+            ],
+            [InlineKeyboardButton("Back to Task List", callback_data=MANAGER_LIST_TASKS)],
+        ]
+        await query.edit_message_text(
+            f"Delete task?\n\n"
+            f"Task: {task['title']}\n"
+            f"Role: {task['worker_role']}\n"
+            f"Time: {task['time']}\n"
+            f"Repeat: {task.get('recurrence', 'daily')}",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
     if data.startswith(MANAGER_FIRE_WORKER_PREFIX):
         worker_id = data.replace(MANAGER_FIRE_WORKER_PREFIX, "", 1)
         worker = store.get_user_by_id(worker_id)
@@ -229,6 +276,43 @@ async def manager_action_callback(update: Update, context: ContextTypes.DEFAULT_
             f"Send the reason for firing {worker['name']} ({worker['worker_role']})."
         )
         return
+
+
+def _format_task_row(index: int, task: dict) -> str:
+    recurrence = task.get("recurrence", "daily")
+    weekday = task.get("weekday")
+    weekly_text = ""
+    if recurrence == "weekly" and weekday is not None and 0 <= weekday < len(WEEKDAYS):
+        weekly_text = f" ({WEEKDAYS[weekday][0]})"
+    return (
+        f"{index}. {task['title']}\n"
+        f"   Worker Role: {task['worker_role']}\n"
+        f"   Worker: {task['worker_name']}\n"
+        f"   Time: {task['time']}\n"
+        f"   Repeat: {recurrence}{weekly_text}"
+    )
+
+
+async def _send_manager_task_list(query, manager_id: str) -> None:
+    tasks = store.list_tasks_for_manager(manager_id)
+    if not tasks:
+        await query.edit_message_text("No active tasks found under you.")
+        return
+
+    task_lines = [_format_task_row(index, task) for index, task in enumerate(tasks, start=1)]
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                f"Delete {index}. {task['title'][:25]}",
+                callback_data=f"{MANAGER_DELETE_TASK_PREFIX}{task['id']}",
+            )
+        ]
+        for index, task in enumerate(tasks, start=1)
+    ]
+    await query.edit_message_text(
+        "Task List\n\n" + "\n\n".join(task_lines),
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
 
 
 def _valid_hhmm(value: str) -> bool:
