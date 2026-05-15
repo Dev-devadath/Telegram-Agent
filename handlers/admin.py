@@ -12,6 +12,7 @@ ADMIN_REMOVE_ROLE = f"{ADMIN_PREFIX}remove_role"
 ADMIN_ADD_MANAGER = f"{ADMIN_PREFIX}add_manager"
 ADMIN_LIST_MANAGERS = f"{ADMIN_PREFIX}list_managers"
 ADMIN_REMOVE_MANAGER = f"{ADMIN_PREFIX}remove_manager"
+ADMIN_EDIT_MANAGER_PASSWORD_PREFIX = f"{ADMIN_PREFIX}edit_manager_password:"
 ADMIN_ADD_TASK = f"{ADMIN_PREFIX}add_task"
 ADMIN_REPORT = f"{ADMIN_PREFIX}report"
 ADMIN_TESTMODE = f"{ADMIN_PREFIX}testmode"
@@ -111,7 +112,49 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.edit_message_text("Send manager Telegram ID.")
         return
 
-    if data in {ADMIN_LIST_MANAGERS, ADMIN_REMOVE_MANAGER}:
+    if data == ADMIN_LIST_MANAGERS:
+        managers = store.list_users_by_role("manager")
+        if not managers:
+            await query.edit_message_text("No active managers available.")
+            return
+        manager_lines = []
+        keyboard = []
+        for idx, manager in enumerate(managers, start=1):
+            password_status = "set" if manager.get("manager_password") else "not set"
+            manager_lines.append(
+                f"{idx}. {manager['name']} ({manager['telegram_id']}) - Password: {password_status}"
+            )
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        f"Edit password - {manager['name']}",
+                        callback_data=f"{ADMIN_EDIT_MANAGER_PASSWORD_PREFIX}{manager['id']}",
+                    )
+                ]
+            )
+
+        await query.edit_message_text(
+            "Active managers:\n"
+            + "\n".join(manager_lines)
+            + "\n\nSelect a manager below to set/update password:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data.startswith(ADMIN_EDIT_MANAGER_PASSWORD_PREFIX):
+        manager_id = data.replace(ADMIN_EDIT_MANAGER_PASSWORD_PREFIX, "", 1)
+        manager = store.get_user_by_id(manager_id)
+        if not manager or manager.get("role") != "manager":
+            await query.edit_message_text("Manager not found.")
+            return
+        context.user_data["admin_state"] = "awaiting_manager_password_update"
+        context.user_data["password_manager_id"] = manager_id
+        await query.edit_message_text(
+            f"Send new registration password for manager {manager['name']}."
+        )
+        return
+
+    if data == ADMIN_REMOVE_MANAGER:
         managers = store.list_users_by_role("manager")
         if not managers:
             await query.edit_message_text("No active managers available.")
@@ -368,15 +411,35 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     if state == "awaiting_manager_name":
+        context.user_data["manager_name"] = text
+        context.user_data["admin_state"] = "awaiting_manager_password"
+        await update.message.reply_text("Now send a registration password for this manager.")
+        return
+
+    if state == "awaiting_manager_password":
         tg_id = context.user_data.pop("manager_telegram_id", None)
+        manager_name = context.user_data.pop("manager_name", None)
         try:
             store.add_user(
                 telegram_id=tg_id,
-                name=text,
+                name=manager_name,
                 system_role="manager",
                 worker_role=None,
+                manager_password=text,
             )
-            await update.message.reply_text("Manager added.")
+            await update.message.reply_text("Manager added with registration password.")
+        except ValueError as exc:
+            await update.message.reply_text(f"Failed: {exc}")
+        context.user_data.pop("admin_state", None)
+        return
+
+    if state == "awaiting_manager_password_update":
+        manager_id = context.user_data.pop("password_manager_id", None)
+        try:
+            manager = store.update_manager_password(manager_id, text)
+            await update.message.reply_text(
+                f"Password updated for manager {manager['name']}."
+            )
         except ValueError as exc:
             await update.message.reply_text(f"Failed: {exc}")
         context.user_data.pop("admin_state", None)

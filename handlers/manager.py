@@ -18,6 +18,7 @@ MANAGER_PREFIX = "manager:"
 MANAGER_ADD_ROLE = f"{MANAGER_PREFIX}add_role"
 MANAGER_ADD_TASK = f"{MANAGER_PREFIX}add_task"
 MANAGER_LIST_TASKS = f"{MANAGER_PREFIX}list_tasks"
+MANAGER_LIST_WORKERS = f"{MANAGER_PREFIX}list_workers"
 MANAGER_FIRE_WORKER = f"{MANAGER_PREFIX}fire_worker"
 MANAGER_FIRE_WORKER_PREFIX = f"{MANAGER_PREFIX}fire_worker:"
 MANAGER_DELETE_TASK_PREFIX = f"{MANAGER_PREFIX}delete_task:"
@@ -52,6 +53,7 @@ def manager_menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("Add Role", callback_data=MANAGER_ADD_ROLE)],
         [InlineKeyboardButton("Add Task", callback_data=MANAGER_ADD_TASK)],
         [InlineKeyboardButton("Task List", callback_data=MANAGER_LIST_TASKS)],
+        [InlineKeyboardButton("Worker List", callback_data=MANAGER_LIST_WORKERS)],
         [InlineKeyboardButton("Fire Worker", callback_data=MANAGER_FIRE_WORKER)],
         [InlineKeyboardButton("Reports", callback_data=f"{REPORT_ROLE_PREFIX}all")],
     ]
@@ -188,6 +190,10 @@ async def manager_action_callback(update: Update, context: ContextTypes.DEFAULT_
 
     if data == MANAGER_LIST_TASKS:
         await _send_manager_task_list(query, manager["id"])
+        return
+
+    if data == MANAGER_LIST_WORKERS:
+        await _send_manager_worker_list(query, manager["id"])
         return
 
     if data == MANAGER_FIRE_WORKER:
@@ -358,6 +364,27 @@ async def _send_manager_task_list(query, manager_id: str) -> None:
         "Task List\n\n" + "\n\n".join(task_lines),
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
+
+
+def _format_worker_row(index: int, worker: dict) -> str:
+    return (
+        f"{index}. {worker['name']}\n"
+        f"   Role: {worker['worker_role']}\n"
+        f"   Telegram ID: {worker['telegram_id']}"
+    )
+
+
+async def _send_manager_worker_list(query, manager_id: str) -> None:
+    workers = store.list_workers_under_manager(manager_id)
+    if not workers:
+        await query.edit_message_text("No active workers are assigned under you.")
+        return
+
+    worker_lines = [
+        _format_worker_row(index, worker)
+        for index, worker in enumerate(workers, start=1)
+    ]
+    await query.edit_message_text("Worker List\n\n" + "\n\n".join(worker_lines))
 
 
 def _valid_hhmm(value: str) -> bool:

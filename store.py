@@ -71,6 +71,11 @@ def _sync_admin_user(data: dict[str, Any]) -> bool:
             changed = True
     data["role_managers"] = role_managers
 
+    for user in users:
+        if user.get("role") == "manager" and "manager_password" not in user:
+            user["manager_password"] = None
+            changed = True
+
     if ADMIN_TELEGRAM_ID:
         # Replace known placeholder admin entry with configured admin ID.
         for user in users:
@@ -252,6 +257,60 @@ def list_roles_for_manager(manager_id: str) -> list[str]:
     ]
 
 
+def get_manager_by_password(password: str) -> dict[str, Any] | None:
+    password = password.strip()
+    if not password:
+        return None
+    data = load_data()
+    for user in data["users"]:
+        if (
+            user.get("role") == "manager"
+            and user.get("active", True)
+            and user.get("manager_password") == password
+        ):
+            return user
+    return None
+
+
+def get_unclaimed_roles_for_manager(manager_id: str) -> list[str]:
+    manager_roles = set(list_roles_for_manager(manager_id))
+    claimed_roles = {
+        user.get("worker_role")
+        for user in load_data()["users"]
+        if user.get("role") == "worker" and user.get("active", True)
+    }
+    return [role for role in manager_roles if role not in claimed_roles]
+
+
+def update_manager_password(manager_id: str, password: str) -> dict[str, Any]:
+    password = password.strip()
+    if not password:
+        raise ValueError("Manager password is required.")
+
+    data = load_data()
+    password_taken = any(
+        user.get("id") != manager_id
+        and user.get("role") == "manager"
+        and user.get("active", True)
+        and user.get("manager_password") == password
+        for user in data["users"]
+    )
+    if password_taken:
+        raise ValueError("Manager password is already used.")
+
+    for idx, user in enumerate(data["users"]):
+        if (
+            user.get("id") == manager_id
+            and user.get("role") == "manager"
+            and user.get("active", True)
+        ):
+            data["users"][idx]["manager_password"] = password
+            save_data(data)
+            return data["users"][idx]
+
+    raise ValueError("Manager not found.")
+
+
 def add_role(role_name: str, manager_id: str | None = None) -> None:
     role_name = role_name.strip()
     if not role_name:
@@ -295,6 +354,7 @@ def add_user(
     name: str,
     system_role: str,
     worker_role: str | None = None,
+    manager_password: str | None = None,
 ) -> dict[str, Any]:
     data = load_data()
     existing_same_role = next(
@@ -345,6 +405,18 @@ def add_user(
             raise ValueError("Worker role does not exist.")
         if get_user_by_role(worker_role):
             raise ValueError("This role is already claimed.")
+    if system_role == "manager":
+        manager_password = (manager_password or "").strip()
+        if not manager_password:
+            raise ValueError("Manager password is required.")
+        password_taken = any(
+            user.get("role") == "manager"
+            and user.get("active", True)
+            and user.get("manager_password") == manager_password
+            for user in data["users"]
+        )
+        if password_taken:
+            raise ValueError("Manager password is already used.")
 
     user = {
         "id": _new_id("u"),
@@ -352,6 +424,7 @@ def add_user(
         "name": name.strip() or system_role.title(),
         "role": system_role,
         "worker_role": worker_role,
+        "manager_password": manager_password if system_role == "manager" else None,
         "active": True,
         "created_at": _now_iso(),
     }
@@ -378,6 +451,8 @@ def add_task(
     role_manager_id = data.get("role_managers", {}).get(worker_role)
     if role_manager_id and role_manager_id != manager_id:
         raise ValueError("This role belongs to another manager.")
+    if not role_manager_id:
+        data.setdefault("role_managers", {})[worker_role] = manager_id
 
     task = {
         "id": _new_id("t"),
