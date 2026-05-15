@@ -1,10 +1,13 @@
 from datetime import datetime, time
+import logging
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 import scheduler
 import store
+
+logger = logging.getLogger(__name__)
 
 VERIFY_PREFIX = "verify:"
 REJECT_PREFIX = "reject:"
@@ -85,6 +88,14 @@ async def manager_verify_callback(update: Update, context: ContextTypes.DEFAULT_
         await query.edit_message_text("Task run not found.")
         return
 
+    worker = store.get_user_by_role(run["worker_role"])
+    task = store.get_task_by_id(run["task_id"])
+    task_title = task["title"] if task else "Task"
+    worker_text = run["worker_role"]
+    worker_notified = False
+    if worker:
+        worker_text = f"{worker['name']} ({run['worker_role']})"
+
     if data.startswith(VERIFY_PREFIX):
         store.update_task_run(
             run_id,
@@ -94,6 +105,20 @@ async def manager_verify_callback(update: Update, context: ContextTypes.DEFAULT_
                 "verified_at": datetime.utcnow().replace(microsecond=0).isoformat(),
             },
         )
+        if worker:
+            try:
+                await context.bot.send_message(
+                    chat_id=worker["telegram_id"],
+                    text=(
+                        f"Manager verified your update.\n"
+                        f"Task: {task_title}\n"
+                        f"Role: {run['worker_role']}\n"
+                        "Status: Accepted."
+                    ),
+                )
+                worker_notified = True
+            except Exception:
+                logger.exception("Failed to notify worker after verify for run_id=%s", run_id)
         await query.edit_message_text("Verified. Task completion is now recorded.")
         return
 
@@ -106,7 +131,27 @@ async def manager_verify_callback(update: Update, context: ContextTypes.DEFAULT_
                 "verified_at": datetime.utcnow().replace(microsecond=0).isoformat(),
             },
         )
-        await query.edit_message_text("Rejected.")
+        if worker:
+            try:
+                await context.bot.send_message(
+                    chat_id=worker["telegram_id"],
+                    text=(
+                        f"Manager rejected your update.\n"
+                        f"Task: {task_title}\n"
+                        f"Role: {run['worker_role']}\n"
+                        "Status: Rejected. Please coordinate with your manager."
+                    ),
+                )
+                worker_notified = True
+            except Exception:
+                logger.exception("Failed to notify worker after reject for run_id=%s", run_id)
+        await query.edit_message_text(
+            (
+                f"Rejected for {worker_text}. Worker has been notified."
+                if worker_notified
+                else f"Rejected for {worker_text}. Worker notification failed."
+            )
+        )
         return
 
 
@@ -509,14 +554,81 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         completion_rate = (
             int((stats["verified"] / stats["total"]) * 100) if stats["total"] else 0
         )
+        yes_count = sum(1 for run in runs if run.get("worker_response") == "yes")
+        no_count = sum(1 for run in runs if run.get("worker_response") == "no")
+        extend_count = sum(1 for run in runs if run.get("worker_response") == "extend")
+        pending_response_count = sum(
+            1 for run in runs if run.get("worker_response") is None
+        )
+        pending_manager_count = sum(
+            1
+            for run in runs
+            if run.get("worker_response") in {"yes", "no"}
+            and run.get("manager_status") == "pending"
+        )
+
+        task_metrics: dict[str, dict[str, int | str]] = {}
+        for run in runs:
+            task_id = run.get("task_id")
+            if not task_id:
+                continue
+            task = store.get_task_by_id(task_id)
+            task_title = task["title"] if task else f"Unknown Task ({task_id})"
+            if task_id not in task_metrics:
+                task_metrics[task_id] = {
+                    "title": task_title,
+                    "total": 0,
+                    "verified": 0,
+                    "not_done": 0,
+                    "rejected": 0,
+                    "pending_manager": 0,
+                }
+
+            metric = task_metrics[task_id]
+            metric["total"] += 1
+            if run.get("status") == "manager_verified":
+                metric["verified"] += 1
+            if run.get("worker_response") == "no":
+                metric["not_done"] += 1
+            if run.get("status") == "manager_rejected":
+                metric["rejected"] += 1
+            if (
+                run.get("worker_response") in {"yes", "no"}
+                and run.get("manager_status") == "pending"
+            ):
+                metric["pending_manager"] += 1
+
+        sorted_task_metrics = sorted(
+            task_metrics.values(), key=lambda item: int(item["total"]), reverse=True
+        )
+        task_lines: list[str] = []
+        max_tasks_to_show = 12
+        for index, metric in enumerate(sorted_task_metrics[:max_tasks_to_show], start=1):
+            task_lines.append(
+                f"{index}) {metric['title']}\n"
+                f"   Total: {metric['total']} | Verified: {metric['verified']} | "
+                f"NO: {metric['not_done']} | Rejected: {metric['rejected']} | "
+                f"Pending manager: {metric['pending_manager']}"
+            )
+        if len(sorted_task_metrics) > max_tasks_to_show:
+            task_lines.append(
+                f"...and {len(sorted_task_metrics) - max_tasks_to_show} more tasks."
+            )
+
         role_label = "All" if role == "all" else role
         report_text = (
             f"Role: {role_label}\n"
+            f"Period: {period.title()}\n\n"
             f"Total assigned: {stats['total']}\n"
             f"Completed (verified): {stats['verified']}\n"
             f"Not completed: {stats['not_completed']}\n"
             f"Rejected by manager: {stats['rejected']}\n"
             f"Extended: {stats['extended']}\n"
-            f"Completion rate: {completion_rate}%"
+            f"Completion rate: {completion_rate}%\n\n"
+            f"Responses -> YES: {yes_count}, NO: {no_count}, EXTEND: {extend_count}, "
+            f"No response: {pending_response_count}\n"
+            f"Manager verification pending: {pending_manager_count}\n\n"
+            "Task-wise metrics:\n"
+            + ("\n".join(task_lines) if task_lines else "No task runs in this period.")
         )
         await query.edit_message_text(report_text)
