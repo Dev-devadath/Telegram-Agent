@@ -54,7 +54,7 @@ def manager_menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("Add Task", callback_data=MANAGER_ADD_TASK)],
         [InlineKeyboardButton("Task List", callback_data=MANAGER_LIST_TASKS)],
         [InlineKeyboardButton("Worker List", callback_data=MANAGER_LIST_WORKERS)],
-        [InlineKeyboardButton("Fire Worker", callback_data=MANAGER_FIRE_WORKER)],
+        [InlineKeyboardButton("Deduct Worker Points", callback_data=MANAGER_FIRE_WORKER)],
         [InlineKeyboardButton("Reports", callback_data=f"{REPORT_ROLE_PREFIX}all")],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -99,6 +99,7 @@ async def manager_verify_callback(update: Update, context: ContextTypes.DEFAULT_
         worker_text = f"{worker['name']} ({run['worker_role']})"
 
     if data.startswith(VERIFY_PREFIX):
+        updated_worker = None
         store.update_task_run(
             run_id,
             {
@@ -108,6 +109,8 @@ async def manager_verify_callback(update: Update, context: ContextTypes.DEFAULT_
             },
         )
         if worker:
+            if run.get("status") not in {"manager_verified", "manager_rejected"}:
+                updated_worker = store.adjust_worker_points(worker["id"], 1)
             try:
                 await context.bot.send_message(
                     chat_id=worker["telegram_id"],
@@ -115,7 +118,9 @@ async def manager_verify_callback(update: Update, context: ContextTypes.DEFAULT_
                         f"Manager verified your update.\n"
                         f"Task: {task_title}\n"
                         f"Role: {run['worker_role']}\n"
-                        "Status: Accepted."
+                        "Status: Accepted.\n"
+                        "+1 point added.\n"
+                        f"Current points: {(updated_worker or worker).get('points', 0)}"
                     ),
                 )
                 worker_notified = True
@@ -125,6 +130,7 @@ async def manager_verify_callback(update: Update, context: ContextTypes.DEFAULT_
         return
 
     if data.startswith(REJECT_PREFIX):
+        updated_worker = None
         store.update_task_run(
             run_id,
             {
@@ -134,6 +140,8 @@ async def manager_verify_callback(update: Update, context: ContextTypes.DEFAULT_
             },
         )
         if worker:
+            if run.get("status") not in {"manager_verified", "manager_rejected"}:
+                updated_worker = store.adjust_worker_points(worker["id"], -2)
             try:
                 await context.bot.send_message(
                     chat_id=worker["telegram_id"],
@@ -141,7 +149,9 @@ async def manager_verify_callback(update: Update, context: ContextTypes.DEFAULT_
                         f"Manager rejected your update.\n"
                         f"Task: {task_title}\n"
                         f"Role: {run['worker_role']}\n"
-                        "Status: Rejected. Please coordinate with your manager."
+                        "Status: Rejected. Please coordinate with your manager.\n"
+                        "-2 points deducted.\n"
+                        f"Current points: {(updated_worker or worker).get('points', 0)}"
                     ),
                 )
                 worker_notified = True
@@ -212,7 +222,7 @@ async def manager_action_callback(update: Update, context: ContextTypes.DEFAULT_
             for worker in workers
         ]
         await query.edit_message_text(
-            "Select worker to fire:",
+            "Select worker to deduct 2 points from:",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return
@@ -330,7 +340,8 @@ async def manager_action_callback(update: Update, context: ContextTypes.DEFAULT_
         context.user_data["manager_state"] = "awaiting_fire_reason"
         context.user_data["fire_worker_id"] = worker_id
         await query.edit_message_text(
-            f"Send the reason for firing {worker['name']} ({worker['worker_role']})."
+            f"Send the reason for deducting points from "
+            f"{worker['name']} ({worker['worker_role']})."
         )
         return
 
@@ -378,7 +389,8 @@ def _format_worker_row(index: int, worker: dict) -> str:
     return (
         f"{index}. {worker['name']}\n"
         f"   Role: {worker['worker_role']}\n"
-        f"   Telegram ID: {worker['telegram_id']}"
+        f"   Telegram ID: {worker['telegram_id']}\n"
+        f"   Points: {worker.get('points', 0)}"
     )
 
 
@@ -542,14 +554,16 @@ async def manager_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await context.bot.send_message(
             chat_id=firing["worker_telegram_id"],
             text=(
-                "You have been fired.\n"
+                "Manager action recorded.\n"
                 f"Role: {firing['worker_role']}\n"
                 f"Reason: {firing['reason']}\n\n"
-                "You are now logged out from this worker role."
+                "-2 points deducted.\n"
+                f"Current points: {firing.get('worker_points', 'n/a')}"
             ),
         )
         await update.message.reply_text(
-            f"Worker fired and notified: {firing['worker_role']} - {firing['worker_name']}"
+            f"Worker notified and -2 points deducted: "
+            f"{firing['worker_role']} - {firing['worker_name']}"
         )
     finally:
         context.user_data.pop("manager_state", None)
@@ -625,6 +639,19 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         completion_rate = (
             int((stats["verified"] / stats["total"]) * 100) if stats["total"] else 0
         )
+        if worker_role:
+            report_workers = [
+                worker
+                for worker in [store.get_user_by_role(worker_role)]
+                if worker is not None
+            ]
+        else:
+            report_workers = store.list_users_by_role("worker")
+        total_worker_points = sum(worker.get("points", 0) for worker in report_workers)
+        point_lines = [
+            f"{worker['name']} ({worker['worker_role']}): {worker.get('points', 0)}"
+            for worker in report_workers
+        ]
         yes_count = sum(1 for run in runs if run.get("worker_response") == "yes")
         no_count = sum(1 for run in runs if run.get("worker_response") == "no")
         extend_count = sum(1 for run in runs if run.get("worker_response") == "extend")
@@ -696,6 +723,10 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"Rejected by manager: {stats['rejected']}\n"
             f"Extended: {stats['extended']}\n"
             f"Completion rate: {completion_rate}%\n\n"
+            f"Total worker points: {total_worker_points}\n"
+            "Worker points:\n"
+            + ("\n".join(point_lines) if point_lines else "No active workers found.")
+            + "\n\n"
             f"Responses -> YES: {yes_count}, NO: {no_count}, EXTEND: {extend_count}, "
             f"No response: {pending_response_count}\n"
             f"Manager verification pending: {pending_manager_count}\n\n"

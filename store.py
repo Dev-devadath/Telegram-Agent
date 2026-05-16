@@ -30,6 +30,7 @@ def _admin_user() -> dict[str, Any]:
         "role": "admin",
         "worker_role": None,
         "manager_password": None,
+        "points": 0,
         "active": True,
         "created_at": None,
     }
@@ -64,6 +65,7 @@ def _run_schema(conn) -> None:
             role text not null check (role in ('admin', 'manager', 'worker')),
             worker_role text,
             manager_password text,
+            points integer not null default 0,
             active boolean not null default true,
             created_at text not null,
             fired_at text,
@@ -112,6 +114,7 @@ def _run_schema(conn) -> None:
             verified_at text
         );
 
+        alter table users add column if not exists points integer not null default 0;
         alter table tasks add column if not exists scheduled_date text;
         alter table task_runs add column if not exists worker_note text;
 
@@ -123,8 +126,11 @@ def _run_schema(conn) -> None:
             worker_telegram_id bigint,
             manager_id text not null,
             reason text not null,
+            points_delta integer not null default -2,
             created_at text not null
         );
+
+        alter table firings add column if not exists points_delta integer not null default -2;
 
         create unique index if not exists users_active_manager_password_idx
             on users(manager_password)
@@ -310,6 +316,22 @@ def list_workers_under_manager(manager_id: str) -> list[dict[str, Any]]:
             """,
             (manager_id, manager_id),
         ).fetchall()
+
+
+def adjust_worker_points(worker_id: str, delta: int) -> dict[str, Any]:
+    with _connect() as conn:
+        worker = conn.execute(
+            """
+            update users
+            set points = points + %s
+            where id = %s and role = 'worker' and active = true
+            returning *
+            """,
+            (delta, worker_id),
+        ).fetchone()
+        if not worker:
+            raise ValueError("Active worker not found.")
+        return worker
 
 
 def list_roles() -> list[str]:
@@ -520,9 +542,10 @@ def add_user(
         user = conn.execute(
             """
             insert into users (
-                id, telegram_id, name, role, worker_role, manager_password, active, created_at
+                id, telegram_id, name, role, worker_role, manager_password,
+                points, active, created_at
             )
-            values (%s, %s, %s, %s, %s, %s, true, %s)
+            values (%s, %s, %s, %s, %s, %s, 0, true, %s)
             returning *
             """,
             (
@@ -621,9 +644,9 @@ def fire_worker(worker_id: str, manager_id: str, reason: str) -> dict[str, Any]:
             """
             insert into firings (
                 id, worker_id, worker_name, worker_role, worker_telegram_id,
-                manager_id, reason, created_at
+                manager_id, reason, points_delta, created_at
             )
-            values (%s, %s, %s, %s, %s, %s, %s, %s)
+            values (%s, %s, %s, %s, %s, %s, %s, -2, %s)
             returning *
             """,
             (
@@ -640,14 +663,19 @@ def fire_worker(worker_id: str, manager_id: str, reason: str) -> dict[str, Any]:
         conn.execute(
             """
             update users
-            set active = false,
-                fired_at = %s,
+            set fired_at = %s,
                 fired_by_manager_id = %s,
-                fired_reason = %s
+                fired_reason = %s,
+                points = points - 2
             where id = %s
             """,
             (fired_at, manager_id, reason.strip(), worker_id),
         )
+        updated_worker = conn.execute(
+            "select * from users where id = %s",
+            (worker_id,),
+        ).fetchone()
+        firing["worker_points"] = updated_worker["points"] if updated_worker else None
         return firing
 
 
