@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
+import unicodedata
 
 import psycopg
 from psycopg.rows import dict_row
@@ -16,6 +17,11 @@ def _now_iso() -> str:
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
+
+
+def _normalize_password(password: str) -> str:
+    normalized = unicodedata.normalize("NFKC", str(password or ""))
+    return "".join(normalized.split())
 
 
 def _is_env_admin(telegram_id: int) -> bool:
@@ -167,6 +173,19 @@ def _ensure_defaults(conn) -> None:
 
     # Admin identity is configuration-only. Remove older DB-backed admin rows.
     conn.execute("delete from users where role = 'admin'")
+    managers = conn.execute(
+        """
+        select id, manager_password from users
+        where role = 'manager' and manager_password is not null
+        """
+    ).fetchall()
+    for manager in managers:
+        normalized_password = _normalize_password(manager["manager_password"])
+        if normalized_password != manager["manager_password"]:
+            conn.execute(
+                "update users set manager_password = %s where id = %s",
+                (normalized_password, manager["id"]),
+            )
 
 
 def ensure_data_file() -> None:
@@ -350,7 +369,7 @@ def list_roles_for_manager(manager_id: str) -> list[str]:
 
 
 def get_manager_by_password(password: str) -> dict[str, Any] | None:
-    password = password.strip()
+    password = _normalize_password(password)
     if not password:
         return None
     with _connect() as conn:
@@ -386,7 +405,7 @@ def get_unclaimed_roles_for_manager(manager_id: str) -> list[str]:
 
 
 def update_manager_password(manager_id: str, password: str) -> dict[str, Any]:
-    password = password.strip()
+    password = _normalize_password(password)
     if not password:
         raise ValueError("Manager password is required.")
 
@@ -525,7 +544,7 @@ def add_user(
                 raise ValueError("This role is already claimed.")
 
         if system_role == "manager":
-            manager_password = (manager_password or "").strip()
+            manager_password = _normalize_password(manager_password or "")
             if not manager_password:
                 raise ValueError("Manager password is required.")
             password_taken = conn.execute(
