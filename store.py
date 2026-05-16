@@ -85,6 +85,7 @@ def _run_schema(conn) -> None:
             worker_role text not null,
             manager_id text not null references users(id) on delete cascade,
             time text not null,
+            scheduled_date text,
             recurrence text not null default 'daily',
             weekday integer,
             active boolean not null default true,
@@ -104,11 +105,15 @@ def _run_schema(conn) -> None:
             status text not null,
             worker_response text,
             reason text,
+            worker_note text,
             manager_status text not null default 'pending',
             created_at text not null,
             completed_at text,
             verified_at text
         );
+
+        alter table tasks add column if not exists scheduled_date text;
+        alter table task_runs add column if not exists worker_note text;
 
         create table if not exists firings (
             id text primary key,
@@ -541,6 +546,7 @@ def add_task(
     time_hhmm: str,
     recurrence: str = "daily",
     weekday: int | None = None,
+    scheduled_date: str | None = None,
 ) -> dict[str, Any]:
     with _connect() as conn:
         role = conn.execute("select * from roles where name = %s", (worker_role,)).fetchone()
@@ -565,10 +571,10 @@ def add_task(
         task = conn.execute(
             """
             insert into tasks (
-                id, title, description, worker_role, manager_id, time,
+                id, title, description, worker_role, manager_id, time, scheduled_date,
                 recurrence, weekday, active, created_at
             )
-            values (%s, %s, %s, %s, %s, %s, %s, %s, true, %s)
+            values (%s, %s, %s, %s, %s, %s, %s, %s, %s, true, %s)
             returning *
             """,
             (
@@ -578,6 +584,7 @@ def add_task(
                 worker_role,
                 manager_id,
                 time_hhmm,
+                scheduled_date,
                 recurrence,
                 weekday,
                 _now_iso(),
@@ -763,6 +770,7 @@ def update_task(task_id: str, updates: dict[str, Any]) -> dict[str, Any]:
         "worker_role",
         "manager_id",
         "time",
+        "scheduled_date",
         "recurrence",
         "weekday",
         "active",
@@ -820,9 +828,10 @@ def add_task_run(task: dict[str, Any], scheduled_for: str) -> dict[str, Any]:
             """
             insert into task_runs (
                 id, task_id, worker_role, manager_id, scheduled_for, status,
-                worker_response, reason, manager_status, created_at, completed_at, verified_at
+                worker_response, reason, worker_note, manager_status,
+                created_at, completed_at, verified_at
             )
-            values (%s, %s, %s, %s, %s, 'sent_to_worker', null, null, 'pending', %s, null, null)
+            values (%s, %s, %s, %s, %s, 'sent_to_worker', null, null, null, 'pending', %s, null, null)
             returning *
             """,
             (
@@ -850,6 +859,7 @@ def update_task_run(run_id: str, updates: dict[str, Any]) -> dict[str, Any]:
         "status",
         "worker_response",
         "reason",
+        "worker_note",
         "manager_status",
         "completed_at",
         "verified_at",

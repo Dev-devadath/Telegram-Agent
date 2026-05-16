@@ -1,4 +1,4 @@
-from datetime import time
+from datetime import datetime, time
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -315,6 +315,12 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         draft = context.user_data.get("task_draft", {})
         draft["recurrence"] = recurrence
         context.user_data["task_draft"] = draft
+        if recurrence == "once":
+            context.user_data["admin_state"] = "awaiting_task_date"
+            await query.edit_message_text(
+                "Send task date in YYYY-MM-DD format (example 2026-05-20)."
+            )
+            return
         if recurrence == "weekly":
             keyboard = [
                 [
@@ -397,6 +403,22 @@ def _valid_hhmm(value: str) -> bool:
         hour, minute = value.split(":")
         time(int(hour), int(minute))
         return True
+    except Exception:
+        return False
+
+
+def _valid_yyyy_mm_dd(value: str) -> bool:
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+        return True
+    except Exception:
+        return False
+
+
+def _once_schedule_is_future(date_value: str, time_value: str) -> bool:
+    try:
+        run_at = datetime.strptime(f"{date_value} {time_value}", "%Y-%m-%d %H:%M")
+        return run_at > datetime.now()
     except Exception:
         return False
 
@@ -504,11 +526,30 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
+    if state == "awaiting_task_date":
+        if not _valid_yyyy_mm_dd(text):
+            await update.message.reply_text("Invalid date format. Send as YYYY-MM-DD.")
+            return
+        draft = context.user_data.get("task_draft", {})
+        draft["scheduled_date"] = text
+        context.user_data["task_draft"] = draft
+        context.user_data["admin_state"] = "awaiting_task_time"
+        await update.message.reply_text(
+            "Send task time in 24h format HH:MM (example 10:30)."
+        )
+        return
+
     if state == "awaiting_task_time":
         if not _valid_hhmm(text):
             await update.message.reply_text("Invalid time format. Send as HH:MM.")
             return
         draft = context.user_data.get("task_draft", {})
+        if draft.get("recurrence") == "once" and draft.get("scheduled_date"):
+            if not _once_schedule_is_future(draft["scheduled_date"], text):
+                await update.message.reply_text(
+                    "The selected date/time is in the past. Send a future time."
+                )
+                return
         draft["time"] = text
         try:
             task = store.add_task(
@@ -519,6 +560,7 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 time_hhmm=draft["time"],
                 recurrence=draft.get("recurrence", "daily"),
                 weekday=draft.get("weekday"),
+                scheduled_date=draft.get("scheduled_date"),
             )
             scheduler.schedule_task_job(context.application, task)
             await update.message.reply_text(

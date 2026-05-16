@@ -9,6 +9,7 @@ import store
 
 TASK_PREFIX = "task_"
 YES_PREFIX = "task_yes:"
+YES_NOTE_PREFIX = "task_yes_note:"
 NO_PREFIX = "task_no:"
 EXTEND_PREFIX = "task_extend:"
 
@@ -56,6 +57,11 @@ async def task_response_callback(update: Update, context: ContextTypes.DEFAULT_T
         await _notify_manager_for_verification(context, run_id)
         return
 
+    if data.startswith(YES_NOTE_PREFIX):
+        context.user_data["pending_yes_note_run_id"] = run_id
+        await query.edit_message_text("Please send the note for this completed task.")
+        return
+
     if data.startswith(NO_PREFIX):
         context.user_data["pending_no_reason_run_id"] = run_id
         await query.edit_message_text("Please send the reason for NO.")
@@ -77,10 +83,31 @@ async def task_response_callback(update: Update, context: ContextTypes.DEFAULT_T
 async def no_reason_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_user or not update.message:
         return
+    if not _is_worker(update.effective_user.id):
+        return
+
+    note_run_id = context.user_data.get("pending_yes_note_run_id")
+    if note_run_id:
+        note = update.message.text.strip()
+        store.update_task_run(
+            note_run_id,
+            {
+                "status": "worker_done",
+                "worker_response": "yes",
+                "worker_note": note,
+                "completed_at": datetime.utcnow().replace(microsecond=0).isoformat(),
+            },
+        )
+        context.user_data.pop("pending_yes_note_run_id", None)
+        await update.message.reply_text(
+            "Note submitted. Sent to manager for verification."
+        )
+        logger.info("Worker YES note captured for run_id=%s", note_run_id)
+        await _notify_manager_for_verification(context, note_run_id)
+        return
+
     run_id = context.user_data.get("pending_no_reason_run_id")
     if not run_id:
-        return
-    if not _is_worker(update.effective_user.id):
         return
 
     reason = update.message.text.strip()
@@ -119,13 +146,15 @@ async def _notify_manager_for_verification(
         return
 
     reason_text = f"\nReason: {run.get('reason')}" if run.get("reason") else ""
+    note_text = f"\nNote: {run.get('worker_note')}" if run.get("worker_note") else ""
     worker_name = worker["name"] if worker else run["worker_role"]
     text = (
         f"Worker update received.\n"
         f"Role: {run['worker_role']} ({worker_name})\n"
         f"Task: {task['title']}\n"
         f"Response: {run.get('worker_response', 'n/a').upper()}"
-        f"{reason_text}\n\nVerify?"
+        f"{reason_text}"
+        f"{note_text}\n\nVerify?"
     )
     markup = InlineKeyboardMarkup(
         [

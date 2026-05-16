@@ -242,6 +242,12 @@ async def manager_action_callback(update: Update, context: ContextTypes.DEFAULT_
         draft = context.user_data.get("manager_task_draft", {})
         draft["recurrence"] = recurrence
         context.user_data["manager_task_draft"] = draft
+        if recurrence == "once":
+            context.user_data["manager_state"] = "awaiting_task_date"
+            await query.edit_message_text(
+                "Send task date in YYYY-MM-DD format (example 2026-05-20)."
+            )
+            return
         if recurrence == "weekly":
             keyboard = [
                 [
@@ -335,12 +341,14 @@ def _format_task_row(index: int, task: dict) -> str:
     weekly_text = ""
     if recurrence == "weekly" and weekday is not None and 0 <= weekday < len(WEEKDAYS):
         weekly_text = f" ({WEEKDAYS[weekday][0]})"
+    date_text = f"\n   Date: {task['scheduled_date']}" if task.get("scheduled_date") else ""
     return (
         f"{index}. {task['title']}\n"
         f"   Worker Role: {task['worker_role']}\n"
         f"   Worker: {task['worker_name']}\n"
         f"   Time: {task['time']}\n"
         f"   Repeat: {recurrence}{weekly_text}"
+        f"{date_text}"
     )
 
 
@@ -392,6 +400,22 @@ def _valid_hhmm(value: str) -> bool:
         hour, minute = value.split(":")
         time(int(hour), int(minute))
         return True
+    except Exception:
+        return False
+
+
+def _valid_yyyy_mm_dd(value: str) -> bool:
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+        return True
+    except Exception:
+        return False
+
+
+def _once_schedule_is_future(date_value: str, time_value: str) -> bool:
+    try:
+        run_at = datetime.strptime(f"{date_value} {time_value}", "%Y-%m-%d %H:%M")
+        return run_at > datetime.now()
     except Exception:
         return False
 
@@ -451,12 +475,31 @@ async def manager_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             context.user_data.pop("manager_state", None)
         return
 
+    if state == "awaiting_task_date":
+        if not _valid_yyyy_mm_dd(text):
+            await update.message.reply_text("Invalid date format. Send as YYYY-MM-DD.")
+            return
+        draft = context.user_data.get("manager_task_draft", {})
+        draft["scheduled_date"] = text
+        context.user_data["manager_task_draft"] = draft
+        context.user_data["manager_state"] = "awaiting_task_time"
+        await update.message.reply_text(
+            "Send task time in 24h format HH:MM (example 10:30)."
+        )
+        return
+
     if state == "awaiting_task_time":
         if not _valid_hhmm(text):
             await update.message.reply_text("Invalid time format. Send as HH:MM.")
             return
 
         draft = context.user_data.get("manager_task_draft", {})
+        if draft.get("recurrence") == "once" and draft.get("scheduled_date"):
+            if not _once_schedule_is_future(draft["scheduled_date"], text):
+                await update.message.reply_text(
+                    "The selected date/time is in the past. Send a future time."
+                )
+                return
         try:
             task = store.add_task(
                 title=draft["title"],
@@ -466,6 +509,7 @@ async def manager_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 time_hhmm=text,
                 recurrence=draft.get("recurrence", "daily"),
                 weekday=draft.get("weekday"),
+                scheduled_date=draft.get("scheduled_date"),
             )
             scheduler.schedule_task_job(context.application, task)
             await update.message.reply_text(

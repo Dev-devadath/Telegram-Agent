@@ -37,11 +37,22 @@ def _next_run_datetime(value: str) -> datetime:
     return run_at
 
 
+def _run_datetime_for_task(task: dict) -> datetime:
+    if task.get("recurrence") == "once" and task.get("scheduled_date"):
+        parsed_time = _parse_time(task["time"])
+        run_date = datetime.strptime(task["scheduled_date"], "%Y-%m-%d").date()
+        return datetime.combine(run_date, parsed_time, tzinfo=_get_scheduler_tz())
+    return _next_run_datetime(task["time"])
+
+
 def _task_keyboard(run_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton("Yes", callback_data=f"task_yes:{run_id}"),
+                InlineKeyboardButton("Yes + Note", callback_data=f"task_yes_note:{run_id}"),
+            ],
+            [
                 InlineKeyboardButton("No", callback_data=f"task_no:{run_id}"),
                 InlineKeyboardButton("Extend 30 mins", callback_data=f"task_extend:{run_id}"),
             ]
@@ -63,7 +74,7 @@ def schedule_task_job(application: Application, task: dict) -> None:
     if recurrence == "once":
         application.job_queue.run_once(
             daily_task_callback,
-            when=_next_run_datetime(task["time"]),
+            when=_run_datetime_for_task(task),
             data={"task_id": task["id"]},
             name=f"{TASK_JOB_PREFIX}{task['id']}",
         )
