@@ -1,15 +1,14 @@
-import json
-import os
-import threading
 import uuid
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Any
 
-from config import ADMIN_TELEGRAM_ID, DATA_FILE
+import psycopg
+from psycopg.rows import dict_row
 
-_LOCK = threading.Lock()
+from config import ADMIN_TELEGRAM_ID, DATABASE_URL
+
 PLACEHOLDER_ADMIN_TELEGRAM_ID = 123456789
+DEFAULT_ROLES = ["Driver", "Cook", "Cleaner", "Security"]
 
 
 def _now_iso() -> str:
@@ -20,266 +19,341 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
 
 
-def _default_data() -> dict[str, Any]:
-    data = {
-        "settings": {
-            "test_mode": False,
-            "test_telegram_id": None,
-        },
-        "roles": ["Driver", "Cook", "Cleaner", "Security"],
-        "role_managers": {},
-        "users": [],
-        "tasks": [],
-        "task_runs": [],
-        "firings": [],
-    }
-    if ADMIN_TELEGRAM_ID:
-        data["users"].append(
-            {
-                "id": _new_id("u"),
-                "telegram_id": ADMIN_TELEGRAM_ID,
-                "name": "Admin",
-                "role": "admin",
-                "worker_role": None,
-                "active": True,
-                "created_at": _now_iso(),
-            }
+def _connect():
+    if not DATABASE_URL:
+        raise RuntimeError(
+            "DATABASE_URL is required. Set it to your Supabase Postgres connection string."
         )
-    return data
+    return psycopg.connect(
+        DATABASE_URL,
+        row_factory=dict_row,
+        sslmode="require",
+        prepare_threshold=None,
+    )
 
 
-def _sync_admin_user(data: dict[str, Any]) -> bool:
-    changed = False
-    for key, default_value in {
-        "settings": {"test_mode": False, "test_telegram_id": None},
-        "roles": ["Driver", "Cook", "Cleaner", "Security"],
-        "role_managers": {},
-        "users": [],
-        "tasks": [],
-        "task_runs": [],
-        "firings": [],
-    }.items():
-        if key not in data:
-            data[key] = default_value
-            changed = True
+def _run_schema(conn) -> None:
+    conn.execute(
+        """
+        create table if not exists app_settings (
+            id boolean primary key default true check (id),
+            test_mode boolean not null default false,
+            test_telegram_id bigint
+        );
 
-    users = data.get("users", [])
-    role_managers = data.get("role_managers", {})
-    for role in data.get("roles", []):
-        if role not in role_managers:
-            role_managers[role] = None
-            changed = True
-    data["role_managers"] = role_managers
+        create table if not exists users (
+            id text primary key,
+            telegram_id bigint not null,
+            name text not null,
+            role text not null check (role in ('admin', 'manager', 'worker')),
+            worker_role text,
+            manager_password text,
+            active boolean not null default true,
+            created_at text not null,
+            fired_at text,
+            fired_by_manager_id text,
+            fired_reason text,
+            removed_at text,
+            removed_by_admin_reason text
+        );
 
-    for user in users:
-        if user.get("role") == "manager" and "manager_password" not in user:
-            user["manager_password"] = None
-            changed = True
+        create table if not exists roles (
+            name text primary key,
+            manager_id text references users(id) on delete set null
+        );
 
-    if ADMIN_TELEGRAM_ID:
-        # Replace known placeholder admin entry with configured admin ID.
-        for user in users:
-            if (
-                user.get("role") == "admin"
-                and user.get("telegram_id") == PLACEHOLDER_ADMIN_TELEGRAM_ID
-                and ADMIN_TELEGRAM_ID != PLACEHOLDER_ADMIN_TELEGRAM_ID
-            ):
-                user["telegram_id"] = ADMIN_TELEGRAM_ID
-                changed = True
+        create table if not exists tasks (
+            id text primary key,
+            title text not null,
+            description text not null,
+            worker_role text not null,
+            manager_id text not null references users(id) on delete cascade,
+            time text not null,
+            recurrence text not null default 'daily',
+            weekday integer,
+            active boolean not null default true,
+            created_at text not null,
+            deleted_at text,
+            deleted_by_manager_id text,
+            disabled_at text,
+            disabled_reason text
+        );
 
-        has_configured_admin = any(
-            user.get("role") == "admin" and user.get("telegram_id") == ADMIN_TELEGRAM_ID
-            for user in users
+        create table if not exists task_runs (
+            id text primary key,
+            task_id text not null references tasks(id) on delete cascade,
+            worker_role text not null,
+            manager_id text not null references users(id) on delete cascade,
+            scheduled_for text not null,
+            status text not null,
+            worker_response text,
+            reason text,
+            manager_status text not null default 'pending',
+            created_at text not null,
+            completed_at text,
+            verified_at text
+        );
+
+        create table if not exists firings (
+            id text primary key,
+            worker_id text not null,
+            worker_name text,
+            worker_role text,
+            worker_telegram_id bigint,
+            manager_id text not null,
+            reason text not null,
+            created_at text not null
+        );
+
+        create unique index if not exists users_active_manager_password_idx
+            on users(manager_password)
+            where role = 'manager' and active = true and manager_password is not null;
+        create unique index if not exists users_active_worker_role_idx
+            on users(worker_role)
+            where role = 'worker' and active = true and worker_role is not null;
+        create index if not exists tasks_active_manager_idx on tasks(manager_id, active);
+        create index if not exists task_runs_report_idx on task_runs(worker_role, created_at);
+
+        alter table app_settings enable row level security;
+        alter table users enable row level security;
+        alter table roles enable row level security;
+        alter table tasks enable row level security;
+        alter table task_runs enable row level security;
+        alter table firings enable row level security;
+        """
+    )
+    conn.execute(
+        """
+        insert into app_settings (id, test_mode, test_telegram_id)
+        values (true, false, null)
+        on conflict (id) do nothing
+        """
+    )
+
+
+def _ensure_defaults(conn) -> None:
+    for role in DEFAULT_ROLES:
+        conn.execute(
+            "insert into roles (name, manager_id) values (%s, null) on conflict (name) do nothing",
+            (role,),
         )
-        if not has_configured_admin:
-            users.append(
-                {
-                    "id": _new_id("u"),
-                    "telegram_id": ADMIN_TELEGRAM_ID,
-                    "name": "Admin",
-                    "role": "admin",
-                    "worker_role": None,
-                    "active": True,
-                    "created_at": _now_iso(),
-                }
-            )
-            changed = True
 
-    data["users"] = users
-    return changed
+    if not ADMIN_TELEGRAM_ID:
+        return
+
+    placeholder = conn.execute(
+        """
+        select * from users
+        where role = 'admin' and telegram_id = %s and active = true
+        """,
+        (PLACEHOLDER_ADMIN_TELEGRAM_ID,),
+    ).fetchone()
+    if placeholder and ADMIN_TELEGRAM_ID != PLACEHOLDER_ADMIN_TELEGRAM_ID:
+        conn.execute(
+            "update users set telegram_id = %s where id = %s",
+            (ADMIN_TELEGRAM_ID, placeholder["id"]),
+        )
+
+    admin = conn.execute(
+        "select * from users where role = 'admin' and telegram_id = %s and active = true",
+        (ADMIN_TELEGRAM_ID,),
+    ).fetchone()
+    if not admin:
+        conn.execute(
+            """
+            insert into users (id, telegram_id, name, role, worker_role, active, created_at)
+            values (%s, %s, 'Admin', 'admin', null, true, %s)
+            """,
+            (_new_id("u"), ADMIN_TELEGRAM_ID, _now_iso()),
+        )
 
 
 def ensure_data_file() -> None:
-    if DATA_FILE.exists():
-        with _LOCK:
-            with DATA_FILE.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-        if _sync_admin_user(data):
-            save_data(data)
-        return
-    DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-    data = _default_data()
-    _sync_admin_user(data)
-    save_data(data)
+    """Initialize Supabase/Postgres tables.
 
-
-def load_data() -> dict[str, Any]:
-    ensure_data_file()
-    with _LOCK:
-        with DATA_FILE.open("r", encoding="utf-8") as f:
-            return json.load(f)
-
-
-def save_data(data: dict[str, Any]) -> None:
-    DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = Path(f"{DATA_FILE}.tmp")
-    with _LOCK:
-        with temp_path.open("w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=True)
-        os.replace(temp_path, DATA_FILE)
+    The old name is kept so the rest of the bot startup code does not need to change.
+    """
+    with _connect() as conn:
+        _run_schema(conn)
+        _ensure_defaults(conn)
 
 
 def get_settings() -> dict[str, Any]:
-    return load_data()["settings"]
+    with _connect() as conn:
+        row = conn.execute(
+            "select test_mode, test_telegram_id from app_settings where id = true"
+        ).fetchone()
+    return {
+        "test_mode": bool(row["test_mode"]) if row else False,
+        "test_telegram_id": row["test_telegram_id"] if row else None,
+    }
 
 
 def set_test_mode(enabled: bool, telegram_id: int | None) -> dict[str, Any]:
-    data = load_data()
-    data["settings"]["test_mode"] = enabled
-    data["settings"]["test_telegram_id"] = telegram_id
-    save_data(data)
-    return data["settings"]
+    with _connect() as conn:
+        conn.execute(
+            """
+            insert into app_settings (id, test_mode, test_telegram_id)
+            values (true, %s, %s)
+            on conflict (id) do update
+            set test_mode = excluded.test_mode,
+                test_telegram_id = excluded.test_telegram_id
+            """,
+            (enabled, telegram_id),
+        )
+    return get_settings()
 
 
 def map_all_workers_to_telegram(telegram_id: int) -> int:
-    data = load_data()
-    updated = 0
-    for idx, user in enumerate(data["users"]):
-        if user.get("role") == "worker" and user.get("active", True):
-            if data["users"][idx].get("telegram_id") != telegram_id:
-                data["users"][idx]["telegram_id"] = telegram_id
-                updated += 1
-    if updated:
-        save_data(data)
-    return updated
+    with _connect() as conn:
+        result = conn.execute(
+            """
+            update users
+            set telegram_id = %s
+            where role = 'worker' and active = true and telegram_id <> %s
+            """,
+            (telegram_id, telegram_id),
+        )
+        return result.rowcount or 0
 
 
 def get_user_by_telegram(telegram_id: int) -> dict[str, Any] | None:
-    data = load_data()
-    for user in data["users"]:
-        if user["telegram_id"] == telegram_id and user.get("active", True):
-            return user
-    return None
+    with _connect() as conn:
+        return conn.execute(
+            "select * from users where telegram_id = %s and active = true limit 1",
+            (telegram_id,),
+        ).fetchone()
 
 
 def list_users_by_telegram(telegram_id: int) -> list[dict[str, Any]]:
-    data = load_data()
-    return [
-        user
-        for user in data["users"]
-        if user.get("telegram_id") == telegram_id and user.get("active", True)
-    ]
+    with _connect() as conn:
+        return conn.execute(
+            "select * from users where telegram_id = %s and active = true order by created_at",
+            (telegram_id,),
+        ).fetchall()
 
 
 def telegram_has_role(telegram_id: int, role: str) -> bool:
-    users = list_users_by_telegram(telegram_id)
-    return any(user.get("role") == role for user in users)
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            select 1 from users
+            where telegram_id = %s and role = %s and active = true
+            limit 1
+            """,
+            (telegram_id, role),
+        ).fetchone()
+    return row is not None
 
 
 def get_user_by_telegram_and_role(telegram_id: int, role: str) -> dict[str, Any] | None:
-    users = list_users_by_telegram(telegram_id)
-    for user in users:
-        if user.get("role") == role:
-            return user
-    return None
+    with _connect() as conn:
+        return conn.execute(
+            """
+            select * from users
+            where telegram_id = %s and role = %s and active = true
+            limit 1
+            """,
+            (telegram_id, role),
+        ).fetchone()
 
 
 def get_user_by_id(user_id: str) -> dict[str, Any] | None:
-    data = load_data()
-    for user in data["users"]:
-        if user["id"] == user_id and user.get("active", True):
-            return user
-    return None
+    with _connect() as conn:
+        return conn.execute(
+            "select * from users where id = %s and active = true",
+            (user_id,),
+        ).fetchone()
 
 
 def get_user_by_role(worker_role: str) -> dict[str, Any] | None:
-    data = load_data()
-    for user in data["users"]:
-        if (
-            user.get("role") == "worker"
-            and user.get("worker_role") == worker_role
-            and user.get("active", True)
-        ):
-            return user
-    return None
+    with _connect() as conn:
+        return conn.execute(
+            """
+            select * from users
+            where role = 'worker' and worker_role = %s and active = true
+            limit 1
+            """,
+            (worker_role,),
+        ).fetchone()
 
 
 def list_users_by_role(role: str) -> list[dict[str, Any]]:
-    data = load_data()
-    return [
-        user
-        for user in data["users"]
-        if user.get("role") == role and user.get("active", True)
-    ]
+    with _connect() as conn:
+        return conn.execute(
+            "select * from users where role = %s and active = true order by created_at",
+            (role,),
+        ).fetchall()
 
 
 def list_workers_under_manager(manager_id: str) -> list[dict[str, Any]]:
-    data = load_data()
-    owned_roles = {
-        role for role, owner_id in data.get("role_managers", {}).items() if owner_id == manager_id
-    }
-    managed_roles = {
-        task.get("worker_role")
-        for task in data["tasks"]
-        if task.get("manager_id") == manager_id and task.get("active", True)
-    }
-    managed_roles.update(owned_roles)
-    return [
-        user
-        for user in data["users"]
-        if user.get("role") == "worker"
-        and user.get("worker_role") in managed_roles
-        and user.get("active", True)
-    ]
+    with _connect() as conn:
+        return conn.execute(
+            """
+            select distinct u.*
+            from users u
+            where u.role = 'worker'
+              and u.active = true
+              and u.worker_role in (
+                select name from roles where manager_id = %s
+                union
+                select worker_role from tasks where manager_id = %s and active = true
+              )
+            order by u.worker_role, u.name
+            """,
+            (manager_id, manager_id),
+        ).fetchall()
 
 
 def list_roles() -> list[str]:
-    return load_data()["roles"]
+    with _connect() as conn:
+        rows = conn.execute("select name from roles order by name").fetchall()
+    return [row["name"] for row in rows]
 
 
 def list_roles_for_manager(manager_id: str) -> list[str]:
-    data = load_data()
-    role_managers = data.get("role_managers", {})
-    return [
-        role
-        for role in data["roles"]
-        if role_managers.get(role) == manager_id
-    ]
+    with _connect() as conn:
+        rows = conn.execute(
+            "select name from roles where manager_id = %s order by name",
+            (manager_id,),
+        ).fetchall()
+    return [row["name"] for row in rows]
 
 
 def get_manager_by_password(password: str) -> dict[str, Any] | None:
     password = password.strip()
     if not password:
         return None
-    data = load_data()
-    for user in data["users"]:
-        if (
-            user.get("role") == "manager"
-            and user.get("active", True)
-            and user.get("manager_password") == password
-        ):
-            return user
-    return None
+    with _connect() as conn:
+        return conn.execute(
+            """
+            select * from users
+            where role = 'manager'
+              and active = true
+              and manager_password = %s
+            limit 1
+            """,
+            (password,),
+        ).fetchone()
 
 
 def get_unclaimed_roles_for_manager(manager_id: str) -> list[str]:
-    manager_roles = set(list_roles_for_manager(manager_id))
-    claimed_roles = {
-        user.get("worker_role")
-        for user in load_data()["users"]
-        if user.get("role") == "worker" and user.get("active", True)
-    }
-    return [role for role in manager_roles if role not in claimed_roles]
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            select r.name
+            from roles r
+            left join users u
+              on u.role = 'worker'
+             and u.worker_role = r.name
+             and u.active = true
+            where r.manager_id = %s
+              and u.id is null
+            order by r.name
+            """,
+            (manager_id,),
+        ).fetchall()
+    return [row["name"] for row in rows]
 
 
 def update_manager_password(manager_id: str, password: str) -> dict[str, Any]:
@@ -287,66 +361,91 @@ def update_manager_password(manager_id: str, password: str) -> dict[str, Any]:
     if not password:
         raise ValueError("Manager password is required.")
 
-    data = load_data()
-    password_taken = any(
-        user.get("id") != manager_id
-        and user.get("role") == "manager"
-        and user.get("active", True)
-        and user.get("manager_password") == password
-        for user in data["users"]
-    )
-    if password_taken:
-        raise ValueError("Manager password is already used.")
+    with _connect() as conn:
+        password_taken = conn.execute(
+            """
+            select 1 from users
+            where id <> %s
+              and role = 'manager'
+              and active = true
+              and manager_password = %s
+            limit 1
+            """,
+            (manager_id, password),
+        ).fetchone()
+        if password_taken:
+            raise ValueError("Manager password is already used.")
 
-    for idx, user in enumerate(data["users"]):
-        if (
-            user.get("id") == manager_id
-            and user.get("role") == "manager"
-            and user.get("active", True)
-        ):
-            data["users"][idx]["manager_password"] = password
-            save_data(data)
-            return data["users"][idx]
-
-    raise ValueError("Manager not found.")
+        manager = conn.execute(
+            """
+            update users
+            set manager_password = %s
+            where id = %s and role = 'manager' and active = true
+            returning *
+            """,
+            (password, manager_id),
+        ).fetchone()
+        if not manager:
+            raise ValueError("Manager not found.")
+        return manager
 
 
 def add_role(role_name: str, manager_id: str | None = None) -> None:
     role_name = role_name.strip()
     if not role_name:
         raise ValueError("Role cannot be empty.")
-    data = load_data()
-    if role_name in data["roles"]:
-        raise ValueError("Role already exists.")
-    if manager_id:
-        manager = get_user_by_id(manager_id)
-        if not manager or manager.get("role") != "manager":
-            raise ValueError("Invalid manager.")
-    data["roles"].append(role_name)
-    data.setdefault("role_managers", {})[role_name] = manager_id
-    save_data(data)
+
+    with _connect() as conn:
+        if manager_id:
+            manager = conn.execute(
+                "select * from users where id = %s and role = 'manager' and active = true",
+                (manager_id,),
+            ).fetchone()
+            if not manager:
+                raise ValueError("Invalid manager.")
+
+        try:
+            conn.execute(
+                "insert into roles (name, manager_id) values (%s, %s)",
+                (role_name, manager_id),
+            )
+        except psycopg.errors.UniqueViolation as exc:
+            raise ValueError("Role already exists.") from exc
 
 
 def remove_role(role_name: str) -> None:
-    data = load_data()
-    if role_name not in data["roles"]:
-        raise ValueError("Role not found.")
-    claimed = get_user_by_role(role_name)
-    if claimed:
-        raise ValueError("Role is already claimed by a worker.")
-    data["roles"] = [role for role in data["roles"] if role != role_name]
-    data.setdefault("role_managers", {}).pop(role_name, None)
-    save_data(data)
+    with _connect() as conn:
+        role = conn.execute("select * from roles where name = %s", (role_name,)).fetchone()
+        if not role:
+            raise ValueError("Role not found.")
+        claimed = conn.execute(
+            """
+            select 1 from users
+            where role = 'worker' and worker_role = %s and active = true
+            limit 1
+            """,
+            (role_name,),
+        ).fetchone()
+        if claimed:
+            raise ValueError("Role is already claimed by a worker.")
+        conn.execute("delete from roles where name = %s", (role_name,))
 
 
 def get_unclaimed_roles() -> list[str]:
-    data = load_data()
-    claimed_roles = {
-        user.get("worker_role")
-        for user in data["users"]
-        if user.get("role") == "worker" and user.get("active", True)
-    }
-    return [role for role in data["roles"] if role not in claimed_roles]
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            select r.name
+            from roles r
+            left join users u
+              on u.role = 'worker'
+             and u.worker_role = r.name
+             and u.active = true
+            where u.id is null
+            order by r.name
+            """
+        ).fetchall()
+    return [row["name"] for row in rows]
 
 
 def add_user(
@@ -356,81 +455,80 @@ def add_user(
     worker_role: str | None = None,
     manager_password: str | None = None,
 ) -> dict[str, Any]:
-    data = load_data()
-    existing_same_role = next(
-        (
-            user
-            for user in data["users"]
-            if user["telegram_id"] == telegram_id
-            and user.get("role") == system_role
-            and user.get("active", True)
-        ),
-        None,
-    )
-    if existing_same_role:
-        raise ValueError(f"Telegram ID is already registered as {system_role}.")
+    with _connect() as conn:
+        existing_same_role = conn.execute(
+            """
+            select 1 from users
+            where telegram_id = %s and role = %s and active = true
+            limit 1
+            """,
+            (telegram_id, system_role),
+        ).fetchone()
+        if existing_same_role:
+            raise ValueError(f"Telegram ID is already registered as {system_role}.")
 
-    settings = data.get("settings", {})
-    is_test_mode = bool(settings.get("test_mode"))
-    test_telegram_id = settings.get("test_telegram_id")
-    if not is_test_mode:
-        existing_any = next(
-            (
-                user
-                for user in data["users"]
-                if user["telegram_id"] == telegram_id and user.get("active", True)
-            ),
-            None,
-        )
-        if existing_any:
-            raise ValueError("Telegram ID already registered.")
-    else:
-        # In test mode, only the configured test telegram ID may be reused
-        # across different roles to simulate full workflow on one account.
-        existing_any = next(
-            (
-                user
-                for user in data["users"]
-                if user["telegram_id"] == telegram_id and user.get("active", True)
-            ),
-            None,
-        )
-        if existing_any and telegram_id != test_telegram_id:
+        settings = get_settings()
+        existing_any = conn.execute(
+            "select 1 from users where telegram_id = %s and active = true limit 1",
+            (telegram_id,),
+        ).fetchone()
+        if not settings.get("test_mode"):
+            if existing_any:
+                raise ValueError("Telegram ID already registered.")
+        elif existing_any and telegram_id != settings.get("test_telegram_id"):
             raise ValueError("Telegram ID already registered.")
 
-    if system_role == "worker":
-        if not worker_role:
-            raise ValueError("Worker role is required.")
-        if worker_role not in data["roles"]:
-            raise ValueError("Worker role does not exist.")
-        if get_user_by_role(worker_role):
-            raise ValueError("This role is already claimed.")
-    if system_role == "manager":
-        manager_password = (manager_password or "").strip()
-        if not manager_password:
-            raise ValueError("Manager password is required.")
-        password_taken = any(
-            user.get("role") == "manager"
-            and user.get("active", True)
-            and user.get("manager_password") == manager_password
-            for user in data["users"]
-        )
-        if password_taken:
-            raise ValueError("Manager password is already used.")
+        if system_role == "worker":
+            if not worker_role:
+                raise ValueError("Worker role is required.")
+            role = conn.execute("select * from roles where name = %s", (worker_role,)).fetchone()
+            if not role:
+                raise ValueError("Worker role does not exist.")
+            claimed = conn.execute(
+                """
+                select 1 from users
+                where role = 'worker' and worker_role = %s and active = true
+                limit 1
+                """,
+                (worker_role,),
+            ).fetchone()
+            if claimed:
+                raise ValueError("This role is already claimed.")
 
-    user = {
-        "id": _new_id("u"),
-        "telegram_id": telegram_id,
-        "name": name.strip() or system_role.title(),
-        "role": system_role,
-        "worker_role": worker_role,
-        "manager_password": manager_password if system_role == "manager" else None,
-        "active": True,
-        "created_at": _now_iso(),
-    }
-    data["users"].append(user)
-    save_data(data)
-    return user
+        if system_role == "manager":
+            manager_password = (manager_password or "").strip()
+            if not manager_password:
+                raise ValueError("Manager password is required.")
+            password_taken = conn.execute(
+                """
+                select 1 from users
+                where role = 'manager' and active = true and manager_password = %s
+                limit 1
+                """,
+                (manager_password,),
+            ).fetchone()
+            if password_taken:
+                raise ValueError("Manager password is already used.")
+
+        user = conn.execute(
+            """
+            insert into users (
+                id, telegram_id, name, role, worker_role, manager_password, active, created_at
+            )
+            values (%s, %s, %s, %s, %s, %s, true, %s)
+            returning *
+            """,
+            (
+                _new_id("u"),
+                telegram_id,
+                name.strip() or system_role.title(),
+                system_role,
+                worker_role,
+                manager_password if system_role == "manager" else None,
+                _now_iso(),
+            ),
+        ).fetchone()
+        return user
 
 
 def add_task(
@@ -442,267 +540,342 @@ def add_task(
     recurrence: str = "daily",
     weekday: int | None = None,
 ) -> dict[str, Any]:
-    data = load_data()
-    if worker_role not in data["roles"]:
-        raise ValueError("Unknown worker role.")
-    manager = get_user_by_id(manager_id)
-    if not manager or manager.get("role") != "manager":
-        raise ValueError("Invalid manager.")
-    role_manager_id = data.get("role_managers", {}).get(worker_role)
-    if role_manager_id and role_manager_id != manager_id:
-        raise ValueError("This role belongs to another manager.")
-    if not role_manager_id:
-        data.setdefault("role_managers", {})[worker_role] = manager_id
+    with _connect() as conn:
+        role = conn.execute("select * from roles where name = %s", (worker_role,)).fetchone()
+        if not role:
+            raise ValueError("Unknown worker role.")
 
-    task = {
-        "id": _new_id("t"),
-        "title": title.strip(),
-        "description": description.strip(),
-        "worker_role": worker_role,
-        "manager_id": manager_id,
-        "time": time_hhmm,
-        "recurrence": recurrence,
-        "weekday": weekday,
-        "active": True,
-        "created_at": _now_iso(),
-    }
-    data["tasks"].append(task)
-    save_data(data)
-    return task
+        manager = conn.execute(
+            "select * from users where id = %s and role = 'manager' and active = true",
+            (manager_id,),
+        ).fetchone()
+        if not manager:
+            raise ValueError("Invalid manager.")
+
+        if role.get("manager_id") and role["manager_id"] != manager_id:
+            raise ValueError("This role belongs to another manager.")
+        if not role.get("manager_id"):
+            conn.execute(
+                "update roles set manager_id = %s where name = %s",
+                (manager_id, worker_role),
+            )
+
+        task = conn.execute(
+            """
+            insert into tasks (
+                id, title, description, worker_role, manager_id, time,
+                recurrence, weekday, active, created_at
+            )
+            values (%s, %s, %s, %s, %s, %s, %s, %s, true, %s)
+            returning *
+            """,
+            (
+                _new_id("t"),
+                title.strip(),
+                description.strip(),
+                worker_role,
+                manager_id,
+                time_hhmm,
+                recurrence,
+                weekday,
+                _now_iso(),
+            ),
+        ).fetchone()
+        return task
 
 
 def fire_worker(worker_id: str, manager_id: str, reason: str) -> dict[str, Any]:
-    data = load_data()
-    worker_idx = None
-    worker = None
-    for idx, user in enumerate(data["users"]):
-        if (
-            user.get("id") == worker_id
-            and user.get("role") == "worker"
-            and user.get("active", True)
-        ):
-            worker_idx = idx
-            worker = user
-            break
+    with _connect() as conn:
+        worker = conn.execute(
+            "select * from users where id = %s and role = 'worker' and active = true",
+            (worker_id,),
+        ).fetchone()
+        if not worker:
+            raise ValueError("Active worker not found.")
 
-    if worker_idx is None or worker is None:
-        raise ValueError("Active worker not found.")
+        managed_role = conn.execute(
+            """
+            select 1
+            where %s in (
+                select name from roles where manager_id = %s
+                union
+                select worker_role from tasks where manager_id = %s and active = true
+            )
+            """,
+            (worker["worker_role"], manager_id, manager_id),
+        ).fetchone()
+        if not managed_role:
+            raise ValueError("This worker is not under this manager.")
 
-    managed_roles = {
-        task.get("worker_role")
-        for task in data["tasks"]
-        if task.get("manager_id") == manager_id and task.get("active", True)
-    }
-    managed_roles.update(
-        role
-        for role, owner_id in data.get("role_managers", {}).items()
-        if owner_id == manager_id
-    )
-    if worker.get("worker_role") not in managed_roles:
-        raise ValueError("This worker is not under this manager.")
-
-    fired_at = _now_iso()
-    firing = {
-        "id": _new_id("f"),
-        "worker_id": worker_id,
-        "worker_name": worker.get("name"),
-        "worker_role": worker.get("worker_role"),
-        "worker_telegram_id": worker.get("telegram_id"),
-        "manager_id": manager_id,
-        "reason": reason.strip(),
-        "created_at": fired_at,
-    }
-    data["firings"].append(firing)
-    data["users"][worker_idx]["active"] = False
-    data["users"][worker_idx]["fired_at"] = fired_at
-    data["users"][worker_idx]["fired_by_manager_id"] = manager_id
-    data["users"][worker_idx]["fired_reason"] = reason.strip()
-    save_data(data)
-    return firing
+        fired_at = _now_iso()
+        firing = conn.execute(
+            """
+            insert into firings (
+                id, worker_id, worker_name, worker_role, worker_telegram_id,
+                manager_id, reason, created_at
+            )
+            values (%s, %s, %s, %s, %s, %s, %s, %s)
+            returning *
+            """,
+            (
+                _new_id("f"),
+                worker_id,
+                worker["name"],
+                worker["worker_role"],
+                worker["telegram_id"],
+                manager_id,
+                reason.strip(),
+                fired_at,
+            ),
+        ).fetchone()
+        conn.execute(
+            """
+            update users
+            set active = false,
+                fired_at = %s,
+                fired_by_manager_id = %s,
+                fired_reason = %s
+            where id = %s
+            """,
+            (fired_at, manager_id, reason.strip(), worker_id),
+        )
+        return firing
 
 
 def remove_manager(manager_id: str) -> dict[str, Any]:
-    data = load_data()
-    removed_at = _now_iso()
-    manager_idx = None
-    manager = None
-    for idx, user in enumerate(data["users"]):
-        if (
-            user.get("id") == manager_id
-            and user.get("role") == "manager"
-            and user.get("active", True)
-        ):
-            manager_idx = idx
-            manager = user
-            break
+    with _connect() as conn:
+        manager = conn.execute(
+            "select * from users where id = %s and role = 'manager' and active = true",
+            (manager_id,),
+        ).fetchone()
+        if not manager:
+            raise ValueError("Active manager not found.")
 
-    if manager_idx is None or manager is None:
-        raise ValueError("Active manager not found.")
+        owned_roles = {
+            row["name"]
+            for row in conn.execute(
+                "select name from roles where manager_id = %s",
+                (manager_id,),
+            ).fetchall()
+        }
+        task_roles = {
+            row["worker_role"]
+            for row in conn.execute(
+                "select worker_role from tasks where manager_id = %s and active = true",
+                (manager_id,),
+            ).fetchall()
+        }
+        affected_roles = owned_roles | task_roles
+        removed_at = _now_iso()
 
-    owned_roles = {
-        role
-        for role, owner_id in data.get("role_managers", {}).items()
-        if owner_id == manager_id
-    }
-    task_roles = {
-        task.get("worker_role")
-        for task in data["tasks"]
-        if task.get("manager_id") == manager_id and task.get("active", True)
-    }
-    affected_roles = owned_roles | task_roles
+        removed_workers: list[dict[str, Any]] = []
+        if affected_roles:
+            removed_workers = conn.execute(
+                """
+                select * from users
+                where role = 'worker' and active = true and worker_role = any(%s)
+                """,
+                (list(affected_roles),),
+            ).fetchall()
+            conn.execute(
+                """
+                update users
+                set active = false,
+                    removed_at = %s,
+                    removed_by_admin_reason = 'Manager removed'
+                where role = 'worker' and active = true and worker_role = any(%s)
+                """,
+                (removed_at, list(affected_roles)),
+            )
 
-    removed_workers: list[dict[str, Any]] = []
-    disabled_tasks = 0
-    for idx, user in enumerate(data["users"]):
-        if (
-            user.get("role") == "worker"
-            and user.get("worker_role") in affected_roles
-            and user.get("active", True)
-        ):
-            data["users"][idx]["active"] = False
-            data["users"][idx]["removed_at"] = removed_at
-            data["users"][idx]["removed_by_admin_reason"] = "Manager removed"
-            removed_workers.append(user)
+        disabled = conn.execute(
+            """
+            update tasks
+            set active = false,
+                disabled_at = %s,
+                disabled_reason = 'Manager removed'
+            where active = true
+              and (manager_id = %s or worker_role = any(%s))
+            """,
+            (removed_at, manager_id, list(affected_roles)),
+        )
+        disabled_tasks = disabled.rowcount or 0
 
-    for idx, task in enumerate(data["tasks"]):
-        if (
-            task.get("manager_id") == manager_id
-            or task.get("worker_role") in affected_roles
-        ) and task.get("active", True):
-            data["tasks"][idx]["active"] = False
-            data["tasks"][idx]["disabled_at"] = removed_at
-            data["tasks"][idx]["disabled_reason"] = "Manager removed"
-            disabled_tasks += 1
+        conn.execute(
+            """
+            update users
+            set active = false,
+                removed_at = %s,
+                removed_by_admin_reason = 'Removed by admin'
+            where id = %s
+            """,
+            (removed_at, manager_id),
+        )
+        if owned_roles:
+            conn.execute("delete from roles where name = any(%s)", (list(owned_roles),))
 
-    data["users"][manager_idx]["active"] = False
-    data["users"][manager_idx]["removed_at"] = removed_at
-    data["users"][manager_idx]["removed_by_admin_reason"] = "Removed by admin"
-
-    data["roles"] = [role for role in data["roles"] if role not in owned_roles]
-    for role in owned_roles:
-        data.setdefault("role_managers", {}).pop(role, None)
-
-    removal = {
-        "manager": manager,
-        "removed_workers": removed_workers,
-        "removed_roles": sorted(owned_roles),
-        "disabled_tasks": disabled_tasks,
-    }
-    save_data(data)
-    return removal
+        return {
+            "manager": manager,
+            "removed_workers": removed_workers,
+            "removed_roles": sorted(owned_roles),
+            "disabled_tasks": disabled_tasks,
+        }
 
 
 def list_active_tasks() -> list[dict[str, Any]]:
-    data = load_data()
-    return [task for task in data["tasks"] if task.get("active", True)]
+    with _connect() as conn:
+        return conn.execute(
+            "select * from tasks where active = true order by created_at"
+        ).fetchall()
 
 
 def list_tasks_for_manager(manager_id: str) -> list[dict[str, Any]]:
-    data = load_data()
-    tasks: list[dict[str, Any]] = []
-    for task in data["tasks"]:
-        if task.get("manager_id") != manager_id or not task.get("active", True):
-            continue
-        worker = next(
-            (
-                user
-                for user in data["users"]
-                if user.get("role") == "worker"
-                and user.get("worker_role") == task.get("worker_role")
-                and user.get("active", True)
-            ),
-            None,
-        )
-        tasks.append(
-            {
-                **task,
-                "worker_name": worker.get("name") if worker else "Unassigned",
-                "worker_telegram_id": worker.get("telegram_id") if worker else None,
-            }
-        )
-    return tasks
+    with _connect() as conn:
+        return conn.execute(
+            """
+            select
+                t.*,
+                coalesce(u.name, 'Unassigned') as worker_name,
+                u.telegram_id as worker_telegram_id
+            from tasks t
+            left join users u
+              on u.role = 'worker'
+             and u.worker_role = t.worker_role
+             and u.active = true
+            where t.manager_id = %s and t.active = true
+            order by t.created_at
+            """,
+            (manager_id,),
+        ).fetchall()
 
 
 def get_task_by_id(task_id: str) -> dict[str, Any] | None:
-    data = load_data()
-    for task in data["tasks"]:
-        if task["id"] == task_id:
-            return task
-    return None
+    with _connect() as conn:
+        return conn.execute("select * from tasks where id = %s", (task_id,)).fetchone()
 
 
 def update_task(task_id: str, updates: dict[str, Any]) -> dict[str, Any]:
-    data = load_data()
-    for idx, task in enumerate(data["tasks"]):
-        if task["id"] == task_id:
-            data["tasks"][idx] = {**task, **updates}
-            save_data(data)
-            return data["tasks"][idx]
-    raise ValueError("Task not found.")
+    allowed = {
+        "title",
+        "description",
+        "worker_role",
+        "manager_id",
+        "time",
+        "recurrence",
+        "weekday",
+        "active",
+        "deleted_at",
+        "deleted_by_manager_id",
+        "disabled_at",
+        "disabled_reason",
+    }
+    fields = [field for field in updates if field in allowed]
+    if not fields:
+        task = get_task_by_id(task_id)
+        if not task:
+            raise ValueError("Task not found.")
+        return task
+
+    assignments = ", ".join(f"{field} = %s" for field in fields)
+    values = [updates[field] for field in fields]
+    values.append(task_id)
+    with _connect() as conn:
+        task = conn.execute(
+            f"update tasks set {assignments} where id = %s returning *",
+            values,
+        ).fetchone()
+        if not task:
+            raise ValueError("Task not found.")
+        return task
 
 
 def deactivate_manager_task(task_id: str, manager_id: str) -> dict[str, Any]:
-    data = load_data()
-    for idx, task in enumerate(data["tasks"]):
-        if task["id"] != task_id:
-            continue
-        if task.get("manager_id") != manager_id:
+    with _connect() as conn:
+        task = conn.execute("select * from tasks where id = %s", (task_id,)).fetchone()
+        if not task:
+            raise ValueError("Task not found.")
+        if task["manager_id"] != manager_id:
             raise ValueError("Task does not belong to this manager.")
         if not task.get("active", True):
             raise ValueError("Task is already deleted.")
 
-        data["tasks"][idx]["active"] = False
-        data["tasks"][idx]["deleted_at"] = _now_iso()
-        data["tasks"][idx]["deleted_by_manager_id"] = manager_id
-        save_data(data)
-        return data["tasks"][idx]
-    raise ValueError("Task not found.")
+        return conn.execute(
+            """
+            update tasks
+            set active = false,
+                deleted_at = %s,
+                deleted_by_manager_id = %s
+            where id = %s
+            returning *
+            """,
+            (_now_iso(), manager_id, task_id),
+        ).fetchone()
 
 
 def add_task_run(task: dict[str, Any], scheduled_for: str) -> dict[str, Any]:
-    data = load_data()
-    run = {
-        "id": _new_id("r"),
-        "task_id": task["id"],
-        "worker_role": task["worker_role"],
-        "manager_id": task["manager_id"],
-        "scheduled_for": scheduled_for,
-        "status": "sent_to_worker",
-        "worker_response": None,
-        "reason": None,
-        "manager_status": "pending",
-        "created_at": _now_iso(),
-        "completed_at": None,
-        "verified_at": None,
-    }
-    data["task_runs"].append(run)
-    save_data(data)
-    return run
+    with _connect() as conn:
+        return conn.execute(
+            """
+            insert into task_runs (
+                id, task_id, worker_role, manager_id, scheduled_for, status,
+                worker_response, reason, manager_status, created_at, completed_at, verified_at
+            )
+            values (%s, %s, %s, %s, %s, 'sent_to_worker', null, null, 'pending', %s, null, null)
+            returning *
+            """,
+            (
+                _new_id("r"),
+                task["id"],
+                task["worker_role"],
+                task["manager_id"],
+                scheduled_for,
+                _now_iso(),
+            ),
+        ).fetchone()
 
 
 def get_task_run(run_id: str) -> dict[str, Any] | None:
-    data = load_data()
-    for run in data["task_runs"]:
-        if run["id"] == run_id:
-            return run
-    return None
+    with _connect() as conn:
+        return conn.execute("select * from task_runs where id = %s", (run_id,)).fetchone()
 
 
 def update_task_run(run_id: str, updates: dict[str, Any]) -> dict[str, Any]:
-    data = load_data()
-    for idx, run in enumerate(data["task_runs"]):
-        if run["id"] == run_id:
-            data["task_runs"][idx] = {**run, **updates}
-            save_data(data)
-            return data["task_runs"][idx]
-    raise ValueError("Task run not found.")
+    allowed = {
+        "task_id",
+        "worker_role",
+        "manager_id",
+        "scheduled_for",
+        "status",
+        "worker_response",
+        "reason",
+        "manager_status",
+        "completed_at",
+        "verified_at",
+    }
+    fields = [field for field in updates if field in allowed]
+    if not fields:
+        run = get_task_run(run_id)
+        if not run:
+            raise ValueError("Task run not found.")
+        return run
+
+    assignments = ", ".join(f"{field} = %s" for field in fields)
+    values = [updates[field] for field in fields]
+    values.append(run_id)
+    with _connect() as conn:
+        run = conn.execute(
+            f"update task_runs set {assignments} where id = %s returning *",
+            values,
+        ).fetchone()
+        if not run:
+            raise ValueError("Task run not found.")
+        return run
 
 
 def get_runs_for_report(
     worker_role: str | None = None,
     period: str = "today",
 ) -> list[dict[str, Any]]:
-    data = load_data()
     now = datetime.utcnow()
     from_time: datetime | None = None
     if period == "today":
@@ -712,15 +885,18 @@ def get_runs_for_report(
     elif period == "month":
         from_time = now - timedelta(days=30)
 
-    results: list[dict[str, Any]] = []
-    for run in data["task_runs"]:
-        if worker_role and run.get("worker_role") != worker_role:
-            continue
-        created_at = datetime.fromisoformat(run["created_at"])
-        if from_time and created_at < from_time:
-            continue
-        results.append(run)
-    return results
+    query = "select * from task_runs where true"
+    params: list[Any] = []
+    if worker_role:
+        query += " and worker_role = %s"
+        params.append(worker_role)
+    if from_time:
+        query += " and created_at >= %s"
+        params.append(from_time.replace(microsecond=0).isoformat())
+    query += " order by created_at desc"
+
+    with _connect() as conn:
+        return conn.execute(query, params).fetchall()
 
 
 def summarize_runs(runs: list[dict[str, Any]]) -> dict[str, int]:
@@ -734,11 +910,17 @@ def summarize_runs(runs: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def reset_all() -> None:
-    data = load_data()
-    admins = [user for user in data["users"] if user.get("role") == "admin"]
-    data["users"] = admins
-    data["tasks"] = []
-    data["task_runs"] = []
-    data["settings"]["test_mode"] = False
-    data["settings"]["test_telegram_id"] = None
-    save_data(data)
+    with _connect() as conn:
+        conn.execute("delete from task_runs")
+        conn.execute("delete from tasks")
+        conn.execute("delete from firings")
+        conn.execute("delete from users where role <> 'admin'")
+        conn.execute("update roles set manager_id = null")
+        conn.execute(
+            """
+            update app_settings
+            set test_mode = false,
+                test_telegram_id = null
+            where id = true
+            """
+        )

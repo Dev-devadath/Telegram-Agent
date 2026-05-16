@@ -20,6 +20,7 @@ ADMIN_RESET = f"{ADMIN_PREFIX}reset"
 ADMIN_RESET_CONFIRM = f"{ADMIN_PREFIX}reset_confirm"
 ADMIN_RESET_CANCEL = f"{ADMIN_PREFIX}reset_cancel"
 ADMIN_REMOVE_ROLE_PREFIX = f"{ADMIN_PREFIX}remove_role:"
+ADMIN_ROLE_MANAGER_PREFIX = f"{ADMIN_PREFIX}role_manager:"
 ADMIN_REMOVE_MANAGER_PREFIX = f"{ADMIN_PREFIX}remove_manager:"
 ADMIN_REMOVE_MANAGER_CONFIRM_PREFIX = f"{ADMIN_PREFIX}remove_manager_confirm:"
 ADMIN_TASK_ROLE_PREFIX = f"{ADMIN_PREFIX}task_role:"
@@ -81,6 +82,26 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if data == ADMIN_ADD_ROLE:
         context.user_data["admin_state"] = "awaiting_role_name"
         await query.edit_message_text("Send the new role name (e.g., Gardener).")
+        return
+
+    if data.startswith(ADMIN_ROLE_MANAGER_PREFIX):
+        manager_id = data.replace(ADMIN_ROLE_MANAGER_PREFIX, "", 1)
+        role_name = context.user_data.pop("pending_role_name", None)
+        context.user_data.pop("admin_state", None)
+        if not role_name:
+            await query.edit_message_text("Role name missing. Start again from Add Role.")
+            return
+        manager = store.get_user_by_id(manager_id)
+        if not manager or manager.get("role") != "manager":
+            await query.edit_message_text("Manager not found.")
+            return
+        try:
+            store.add_role(role_name, manager_id=manager_id)
+            await query.edit_message_text(
+                f"Role added: {role_name}\nManager: {manager['name']}"
+            )
+        except ValueError as exc:
+            await query.edit_message_text(f"Failed: {exc}")
         return
 
     if data == ADMIN_REMOVE_ROLE:
@@ -393,12 +414,26 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = update.message.text.strip()
 
     if state == "awaiting_role_name":
-        try:
-            store.add_role(text)
-            await update.message.reply_text(f"Role added: {text}")
-        except ValueError as exc:
-            await update.message.reply_text(f"Failed: {exc}")
-        context.user_data.pop("admin_state", None)
+        managers = store.list_users_by_role("manager")
+        if not managers:
+            await update.message.reply_text("Add at least one manager before creating roles.")
+            context.user_data.pop("admin_state", None)
+            return
+
+        context.user_data["pending_role_name"] = text
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    f"{manager['name']} ({manager['telegram_id']})",
+                    callback_data=f"{ADMIN_ROLE_MANAGER_PREFIX}{manager['id']}",
+                )
+            ]
+            for manager in managers
+        ]
+        await update.message.reply_text(
+            f"Role: {text}\nSelect manager for this role:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
         return
 
     if state == "awaiting_manager_telegram_id":
