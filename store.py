@@ -35,6 +35,7 @@ def _admin_user() -> dict[str, Any]:
         "name": "Admin",
         "role": "admin",
         "worker_role": None,
+        "owner_id": None,
         "manager_password": None,
         "points": 0,
         "active": True,
@@ -68,8 +69,9 @@ def _run_schema(conn) -> None:
             id text primary key,
             telegram_id bigint not null,
             name text not null,
-            role text not null check (role in ('admin', 'manager', 'worker')),
+            role text not null check (role in ('admin', 'owner', 'manager', 'worker')),
             worker_role text,
+            owner_id text references users(id) on delete set null,
             manager_password text,
             points integer not null default 0,
             active boolean not null default true,
@@ -121,6 +123,10 @@ def _run_schema(conn) -> None:
         );
 
         alter table users add column if not exists points integer not null default 0;
+        alter table users add column if not exists owner_id text references users(id) on delete set null;
+        alter table users drop constraint if exists users_role_check;
+        alter table users add constraint users_role_check
+            check (role in ('admin', 'owner', 'manager', 'worker'));
         alter table tasks add column if not exists scheduled_date text;
         alter table task_runs add column if not exists worker_note text;
 
@@ -144,6 +150,8 @@ def _run_schema(conn) -> None:
         create unique index if not exists users_active_worker_role_idx
             on users(worker_role)
             where role = 'worker' and active = true and worker_role is not null;
+        create index if not exists users_active_owner_idx on users(owner_id)
+            where active = true;
         create index if not exists tasks_active_manager_idx on tasks(manager_id, active);
         create index if not exists task_runs_report_idx on task_runs(worker_role, created_at);
 
@@ -318,6 +326,41 @@ def list_users_by_role(role: str) -> list[dict[str, Any]]:
         ).fetchall()
 
 
+def assign_manager_to_owner(manager_id: str, owner_id: str) -> dict[str, Any]:
+    with _connect() as conn:
+        owner = conn.execute(
+            "select * from users where id = %s and role = 'owner' and active = true",
+            (owner_id,),
+        ).fetchone()
+        if not owner:
+            raise ValueError("Owner not found.")
+
+        manager = conn.execute(
+            """
+            update users
+            set owner_id = %s
+            where id = %s and role = 'manager' and active = true
+            returning *
+            """,
+            (owner_id, manager_id),
+        ).fetchone()
+        if not manager:
+            raise ValueError("Manager not found.")
+        return manager
+
+
+def list_managers_for_owner(owner_id: str) -> list[dict[str, Any]]:
+    with _connect() as conn:
+        return conn.execute(
+            """
+            select * from users
+            where role = 'manager' and active = true and owner_id = %s
+            order by name, created_at
+            """,
+            (owner_id,),
+        ).fetchall()
+
+
 def list_workers_under_manager(manager_id: str) -> list[dict[str, Any]]:
     with _connect() as conn:
         return conn.execute(
@@ -334,6 +377,34 @@ def list_workers_under_manager(manager_id: str) -> list[dict[str, Any]]:
             order by u.worker_role, u.name
             """,
             (manager_id, manager_id),
+        ).fetchall()
+
+
+def list_workers_under_owner(owner_id: str) -> list[dict[str, Any]]:
+    with _connect() as conn:
+        return conn.execute(
+            """
+            select distinct u.*
+            from users u
+            where u.role = 'worker'
+              and u.active = true
+              and u.worker_role in (
+                select r.name
+                from roles r
+                join users m on m.id = r.manager_id
+                where m.role = 'manager' and m.active = true and m.owner_id = %s
+                union
+                select t.worker_role
+                from tasks t
+                join users m on m.id = t.manager_id
+                where t.active = true
+                  and m.role = 'manager'
+                  and m.active = true
+                  and m.owner_id = %s
+              )
+            order by u.worker_role, u.name
+            """,
+            (owner_id, owner_id),
         ).fetchall()
 
 
@@ -364,6 +435,23 @@ def list_roles_for_manager(manager_id: str) -> list[str]:
         rows = conn.execute(
             "select name from roles where manager_id = %s order by name",
             (manager_id,),
+        ).fetchall()
+    return [row["name"] for row in rows]
+
+
+def list_roles_for_owner(owner_id: str) -> list[str]:
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            select distinct r.name
+            from roles r
+            join users m on m.id = r.manager_id
+            where m.role = 'manager'
+              and m.active = true
+              and m.owner_id = %s
+            order by r.name
+            """,
+            (owner_id,),
         ).fetchall()
     return [row["name"] for row in rows]
 
@@ -805,6 +893,32 @@ def list_tasks_for_manager(manager_id: str) -> list[dict[str, Any]]:
         ).fetchall()
 
 
+def list_tasks_for_owner(owner_id: str) -> list[dict[str, Any]]:
+    with _connect() as conn:
+        return conn.execute(
+            """
+            select
+                t.*,
+                coalesce(u.name, 'Unassigned') as worker_name,
+                u.telegram_id as worker_telegram_id,
+                m.name as manager_name
+            from tasks t
+            join users m
+              on m.id = t.manager_id
+             and m.role = 'manager'
+             and m.active = true
+             and m.owner_id = %s
+            left join users u
+              on u.role = 'worker'
+             and u.worker_role = t.worker_role
+             and u.active = true
+            where t.active = true
+            order by m.name, t.created_at
+            """,
+            (owner_id,),
+        ).fetchall()
+
+
 def get_task_by_id(task_id: str) -> dict[str, Any] | None:
     with _connect() as conn:
         return conn.execute("select * from tasks where id = %s", (task_id,)).fetchone()
@@ -934,6 +1048,8 @@ def update_task_run(run_id: str, updates: dict[str, Any]) -> dict[str, Any]:
 def get_runs_for_report(
     worker_role: str | None = None,
     period: str = "today",
+    manager_id: str | None = None,
+    owner_id: str | None = None,
 ) -> list[dict[str, Any]]:
     now = datetime.utcnow()
     from_time: datetime | None = None
@@ -949,6 +1065,17 @@ def get_runs_for_report(
     if worker_role:
         query += " and worker_role = %s"
         params.append(worker_role)
+    if manager_id:
+        query += " and manager_id = %s"
+        params.append(manager_id)
+    if owner_id:
+        query += (
+            " and manager_id in ("
+            "select id from users "
+            "where role = 'manager' and active = true and owner_id = %s"
+            ")"
+        )
+        params.append(owner_id)
     if from_time:
         query += " and created_at >= %s"
         params.append(from_time.replace(microsecond=0).isoformat())

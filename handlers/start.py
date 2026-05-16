@@ -2,7 +2,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 import store
-from handlers.manager import manager_menu_markup
+from handlers.manager import manager_menu_markup, owner_menu_markup
 
 
 REGISTER_ROLE_PREFIX = "register_role:"
@@ -44,6 +44,14 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     telegram_id = update.effective_user.id
+    if store.telegram_has_role(telegram_id, "owner"):
+        owner = store.get_user_by_telegram_and_role(telegram_id, "owner")
+        await update.message.reply_text(
+            f"Welcome back, Owner {owner['name']}.",
+            reply_markup=owner_menu_markup(),
+        )
+        return
+
     if store.telegram_has_role(telegram_id, "manager"):
         manager = store.get_user_by_telegram_and_role(telegram_id, "manager")
         await update.message.reply_text(

@@ -21,6 +21,8 @@ from handlers.manager import (
     manager_panel,
     manager_text_handler,
     manager_verify_callback,
+    owner_action_callback,
+    owner_panel,
     report_callback,
     report_handler,
 )
@@ -73,7 +75,8 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/demo - Try a quick self-guided demo\n"
         "/admin - Open admin panel\n"
         "/manager - Open manager panel\n"
-        "/report - View reports (manager/admin)\n"
+        "/owner - Open owner panel\n"
+        "/report - View reports (manager/owner/admin)\n"
         "/help - Show this help"
     )
 
@@ -94,6 +97,7 @@ def main() -> None:
     app.add_handler(CommandHandler("demo", demo_handler))
     app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(CommandHandler("manager", manager_panel))
+    app.add_handler(CommandHandler("owner", owner_panel))
     app.add_handler(CommandHandler("report", report_handler))
     app.add_handler(CommandHandler("help", help_handler))
 
@@ -102,6 +106,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(task_response_callback, pattern=r"^task_(yes_note|yes|no|extend):"))
     app.add_handler(CallbackQueryHandler(manager_verify_callback, pattern=r"^(verify|reject):"))
     app.add_handler(CallbackQueryHandler(manager_action_callback, pattern=r"^manager:"))
+    app.add_handler(CallbackQueryHandler(owner_action_callback, pattern=r"^owner:"))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^admin:"))
     app.add_handler(CallbackQueryHandler(report_callback, pattern=r"^report_(role|period):"))
 

@@ -27,6 +27,11 @@ MANAGER_TASK_ROLE_PREFIX = f"{MANAGER_PREFIX}task_role:"
 MANAGER_TASK_RECURRENCE_PREFIX = f"{MANAGER_PREFIX}task_recurrence:"
 MANAGER_TASK_WEEKDAY_PREFIX = f"{MANAGER_PREFIX}task_weekday:"
 
+OWNER_PREFIX = "owner:"
+OWNER_LIST_TASKS = f"{OWNER_PREFIX}list_tasks"
+OWNER_LIST_WORKERS = f"{OWNER_PREFIX}list_workers"
+OWNER_REPORTS = f"{OWNER_PREFIX}reports"
+
 WEEKDAYS = [
     ("Monday", 0),
     ("Tuesday", 1),
@@ -41,11 +46,23 @@ WEEKDAYS = [
 def _can_view_reports(telegram_id: int) -> bool:
     return store.telegram_has_role(telegram_id, "admin") or store.telegram_has_role(
         telegram_id, "manager"
+    ) or store.telegram_has_role(
+        telegram_id, "owner"
+    )
+
+
+def _can_verify_task(telegram_id: int) -> bool:
+    return store.telegram_has_role(telegram_id, "admin") or store.telegram_has_role(
+        telegram_id, "manager"
     )
 
 
 def _get_manager_user(telegram_id: int) -> dict | None:
     return store.get_user_by_telegram_and_role(telegram_id, "manager")
+
+
+def _get_owner_user(telegram_id: int) -> dict | None:
+    return store.get_user_by_telegram_and_role(telegram_id, "owner")
 
 
 def manager_menu_markup() -> InlineKeyboardMarkup:
@@ -56,6 +73,15 @@ def manager_menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("Worker List", callback_data=MANAGER_LIST_WORKERS)],
         [InlineKeyboardButton("Deduct Worker Points", callback_data=MANAGER_FIRE_WORKER)],
         [InlineKeyboardButton("Reports", callback_data=f"{REPORT_ROLE_PREFIX}all")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def owner_menu_markup() -> InlineKeyboardMarkup:
+    keyboard = [
+        [InlineKeyboardButton("Task List", callback_data=OWNER_LIST_TASKS)],
+        [InlineKeyboardButton("Worker List", callback_data=OWNER_LIST_WORKERS)],
+        [InlineKeyboardButton("Reports", callback_data=OWNER_REPORTS)],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -74,11 +100,25 @@ async def manager_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
 
+async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.effective_user or not update.message:
+        return
+    owner = _get_owner_user(update.effective_user.id)
+    if not owner:
+        await update.message.reply_text("Only owners can use this command.")
+        return
+
+    await update.message.reply_text(
+        "Owner panel:",
+        reply_markup=owner_menu_markup(),
+    )
+
+
 async def manager_verify_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query or not query.from_user:
         return
-    if not _can_view_reports(query.from_user.id):
+    if not _can_verify_task(query.from_user.id):
         await query.answer("Not allowed.", show_alert=True)
         return
     await query.answer()
@@ -346,6 +386,32 @@ async def manager_action_callback(update: Update, context: ContextTypes.DEFAULT_
         return
 
 
+async def owner_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not query.from_user:
+        return
+
+    owner = _get_owner_user(query.from_user.id)
+    if not owner:
+        await query.answer("Only owners can do this.", show_alert=True)
+        return
+
+    await query.answer()
+    data = query.data
+
+    if data == OWNER_LIST_TASKS:
+        await _send_owner_task_list(query, owner["id"])
+        return
+
+    if data == OWNER_LIST_WORKERS:
+        await _send_owner_worker_list(query, owner["id"])
+        return
+
+    if data == OWNER_REPORTS:
+        await _send_report_role_choices(query, query.from_user.id)
+        return
+
+
 def _format_task_row(index: int, task: dict) -> str:
     recurrence = task.get("recurrence", "daily")
     weekday = task.get("weekday")
@@ -353,10 +419,12 @@ def _format_task_row(index: int, task: dict) -> str:
     if recurrence == "weekly" and weekday is not None and 0 <= weekday < len(WEEKDAYS):
         weekly_text = f" ({WEEKDAYS[weekday][0]})"
     date_text = f"\n   Date: {task['scheduled_date']}" if task.get("scheduled_date") else ""
+    manager_text = f"   Manager: {task['manager_name']}\n" if task.get("manager_name") else ""
     return (
         f"{index}. {task['title']}\n"
         f"   Worker Role: {task['worker_role']}\n"
         f"   Worker: {task['worker_name']}\n"
+        f"{manager_text}"
         f"   Time: {task['time']}\n"
         f"   Repeat: {recurrence}{weekly_text}"
         f"{date_text}"
@@ -385,6 +453,16 @@ async def _send_manager_task_list(query, manager_id: str) -> None:
     )
 
 
+async def _send_owner_task_list(query, owner_id: str) -> None:
+    tasks = store.list_tasks_for_owner(owner_id)
+    if not tasks:
+        await query.edit_message_text("No active tasks found under your managers.")
+        return
+
+    task_lines = [_format_task_row(index, task) for index, task in enumerate(tasks, start=1)]
+    await query.edit_message_text("Task List\n\n" + "\n\n".join(task_lines))
+
+
 def _format_worker_row(index: int, worker: dict) -> str:
     return (
         f"{index}. {worker['name']}\n"
@@ -405,6 +483,85 @@ async def _send_manager_worker_list(query, manager_id: str) -> None:
         for index, worker in enumerate(workers, start=1)
     ]
     await query.edit_message_text("Worker List\n\n" + "\n\n".join(worker_lines))
+
+
+async def _send_owner_worker_list(query, owner_id: str) -> None:
+    workers = store.list_workers_under_owner(owner_id)
+    if not workers:
+        await query.edit_message_text("No active workers are assigned under your managers.")
+        return
+
+    worker_lines = [
+        _format_worker_row(index, worker)
+        for index, worker in enumerate(workers, start=1)
+    ]
+    await query.edit_message_text("Worker List\n\n" + "\n\n".join(worker_lines))
+
+
+def _report_scope_for_user(telegram_id: int) -> dict:
+    if store.telegram_has_role(telegram_id, "admin"):
+        return {
+            "type": "admin",
+            "roles": store.list_roles(),
+            "manager_id": None,
+            "owner_id": None,
+            "workers": store.list_users_by_role("worker"),
+        }
+
+    owner = _get_owner_user(telegram_id)
+    if owner:
+        return {
+            "type": "owner",
+            "roles": store.list_roles_for_owner(owner["id"]),
+            "manager_id": None,
+            "owner_id": owner["id"],
+            "workers": store.list_workers_under_owner(owner["id"]),
+        }
+
+    manager = _get_manager_user(telegram_id)
+    if manager:
+        return {
+            "type": "manager",
+            "roles": store.list_roles_for_manager(manager["id"]),
+            "manager_id": manager["id"],
+            "owner_id": None,
+            "workers": store.list_workers_under_manager(manager["id"]),
+        }
+
+    return {
+        "type": "none",
+        "roles": [],
+        "manager_id": None,
+        "owner_id": None,
+        "workers": [],
+    }
+
+
+async def _send_report_role_choices(target, telegram_id: int) -> None:
+    scope = _report_scope_for_user(telegram_id)
+    roles = scope["roles"]
+    if not roles:
+        text = (
+            "No roles found for reports."
+            if scope["type"] == "admin"
+            else "No roles are assigned under you yet."
+        )
+        if hasattr(target, "edit_message_text"):
+            await target.edit_message_text(text)
+        else:
+            await target.reply_text(text)
+        return
+
+    role_buttons = [[InlineKeyboardButton("All", callback_data=f"{REPORT_ROLE_PREFIX}all")]]
+    for role in roles:
+        role_buttons.append(
+            [InlineKeyboardButton(role, callback_data=f"{REPORT_ROLE_PREFIX}{role}")]
+        )
+    markup = InlineKeyboardMarkup(role_buttons)
+    if hasattr(target, "edit_message_text"):
+        await target.edit_message_text("Select role:", reply_markup=markup)
+    else:
+        await target.reply_text("Select role:", reply_markup=markup)
 
 
 def _valid_hhmm(value: str) -> bool:
@@ -574,19 +731,10 @@ async def report_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not update.effective_user or not update.message:
         return
     if not _can_view_reports(update.effective_user.id):
-        await update.message.reply_text("Only managers/admin can view reports.")
+        await update.message.reply_text("Only managers, owners, or admin can view reports.")
         return
 
-    roles = store.list_roles()
-    role_buttons = [[InlineKeyboardButton("All", callback_data=f"{REPORT_ROLE_PREFIX}all")]]
-    for role in roles:
-        role_buttons.append(
-            [InlineKeyboardButton(role, callback_data=f"{REPORT_ROLE_PREFIX}{role}")]
-        )
-    await update.message.reply_text(
-        "Select role:",
-        reply_markup=InlineKeyboardMarkup(role_buttons),
-    )
+    await _send_report_role_choices(update.message, update.effective_user.id)
 
 
 async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -601,6 +749,10 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     data = query.data
     if data.startswith(REPORT_ROLE_PREFIX):
         role = data.replace(REPORT_ROLE_PREFIX, "", 1)
+        scope = _report_scope_for_user(query.from_user.id)
+        if role != "all" and role not in scope["roles"]:
+            await query.edit_message_text("This role is not available in your report scope.")
+            return
         keyboard = [
             [
                 InlineKeyboardButton(
@@ -633,8 +785,17 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         payload = data.replace(REPORT_PERIOD_PREFIX, "", 1)
         period, role = payload.split("|", maxsplit=1)
         worker_role = None if role == "all" else role
+        scope = _report_scope_for_user(query.from_user.id)
+        if worker_role and worker_role not in scope["roles"]:
+            await query.edit_message_text("This role is not available in your report scope.")
+            return
 
-        runs = store.get_runs_for_report(worker_role=worker_role, period=period)
+        runs = store.get_runs_for_report(
+            worker_role=worker_role,
+            period=period,
+            manager_id=scope["manager_id"],
+            owner_id=scope["owner_id"],
+        )
         stats = store.summarize_runs(runs)
         completion_rate = (
             int((stats["verified"] / stats["total"]) * 100) if stats["total"] else 0
@@ -646,7 +807,7 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 if worker is not None
             ]
         else:
-            report_workers = store.list_users_by_role("worker")
+            report_workers = scope["workers"]
         total_worker_points = sum(worker.get("points", 0) for worker in report_workers)
         point_lines = [
             f"{worker['name']} ({worker['worker_role']}): {worker.get('points', 0)}"
