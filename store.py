@@ -7,7 +7,6 @@ from psycopg.rows import dict_row
 
 from config import ADMIN_TELEGRAM_ID, DATABASE_URL
 
-PLACEHOLDER_ADMIN_TELEGRAM_ID = 123456789
 DEFAULT_ROLES = ["Driver", "Cook", "Cleaner", "Security"]
 
 
@@ -17,6 +16,23 @@ def _now_iso() -> str:
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
+
+
+def _is_env_admin(telegram_id: int) -> bool:
+    return bool(ADMIN_TELEGRAM_ID and telegram_id == ADMIN_TELEGRAM_ID)
+
+
+def _admin_user() -> dict[str, Any]:
+    return {
+        "id": "env_admin",
+        "telegram_id": ADMIN_TELEGRAM_ID,
+        "name": "Admin",
+        "role": "admin",
+        "worker_role": None,
+        "manager_password": None,
+        "active": True,
+        "created_at": None,
+    }
 
 
 def _connect():
@@ -138,34 +154,8 @@ def _ensure_defaults(conn) -> None:
             (role,),
         )
 
-    if not ADMIN_TELEGRAM_ID:
-        return
-
-    placeholder = conn.execute(
-        """
-        select * from users
-        where role = 'admin' and telegram_id = %s and active = true
-        """,
-        (PLACEHOLDER_ADMIN_TELEGRAM_ID,),
-    ).fetchone()
-    if placeholder and ADMIN_TELEGRAM_ID != PLACEHOLDER_ADMIN_TELEGRAM_ID:
-        conn.execute(
-            "update users set telegram_id = %s where id = %s",
-            (ADMIN_TELEGRAM_ID, placeholder["id"]),
-        )
-
-    admin = conn.execute(
-        "select * from users where role = 'admin' and telegram_id = %s and active = true",
-        (ADMIN_TELEGRAM_ID,),
-    ).fetchone()
-    if not admin:
-        conn.execute(
-            """
-            insert into users (id, telegram_id, name, role, worker_role, active, created_at)
-            values (%s, %s, 'Admin', 'admin', null, true, %s)
-            """,
-            (_new_id("u"), ADMIN_TELEGRAM_ID, _now_iso()),
-        )
+    # Admin identity is configuration-only. Remove older DB-backed admin rows.
+    conn.execute("delete from users where role = 'admin'")
 
 
 def ensure_data_file() -> None:
@@ -219,21 +209,31 @@ def map_all_workers_to_telegram(telegram_id: int) -> int:
 
 def get_user_by_telegram(telegram_id: int) -> dict[str, Any] | None:
     with _connect() as conn:
-        return conn.execute(
+        user = conn.execute(
             "select * from users where telegram_id = %s and active = true limit 1",
             (telegram_id,),
         ).fetchone()
+    if user:
+        return user
+    if _is_env_admin(telegram_id):
+        return _admin_user()
+    return None
 
 
 def list_users_by_telegram(telegram_id: int) -> list[dict[str, Any]]:
     with _connect() as conn:
-        return conn.execute(
+        users = conn.execute(
             "select * from users where telegram_id = %s and active = true order by created_at",
             (telegram_id,),
         ).fetchall()
+    if _is_env_admin(telegram_id):
+        users.append(_admin_user())
+    return users
 
 
 def telegram_has_role(telegram_id: int, role: str) -> bool:
+    if role == "admin":
+        return _is_env_admin(telegram_id)
     with _connect() as conn:
         row = conn.execute(
             """
@@ -247,6 +247,8 @@ def telegram_has_role(telegram_id: int, role: str) -> bool:
 
 
 def get_user_by_telegram_and_role(telegram_id: int, role: str) -> dict[str, Any] | None:
+    if role == "admin" and _is_env_admin(telegram_id):
+        return _admin_user()
     with _connect() as conn:
         return conn.execute(
             """
@@ -914,7 +916,7 @@ def reset_all() -> None:
         conn.execute("delete from task_runs")
         conn.execute("delete from tasks")
         conn.execute("delete from firings")
-        conn.execute("delete from users where role <> 'admin'")
+        conn.execute("delete from users")
         conn.execute("update roles set manager_id = null")
         conn.execute(
             """
