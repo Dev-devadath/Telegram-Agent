@@ -26,6 +26,7 @@ MANAGER_DELETE_TASK_CONFIRM_PREFIX = f"{MANAGER_PREFIX}delete_task_confirm:"
 MANAGER_TASK_ROLE_PREFIX = f"{MANAGER_PREFIX}task_role:"
 MANAGER_TASK_RECURRENCE_PREFIX = f"{MANAGER_PREFIX}task_recurrence:"
 MANAGER_TASK_WEEKDAY_PREFIX = f"{MANAGER_PREFIX}task_weekday:"
+MANAGER_TASK_PARENT_PREFIX = f"{MANAGER_PREFIX}task_parent:"
 
 OWNER_PREFIX = "owner:"
 OWNER_LIST_TASKS = f"{OWNER_PREFIX}list_tasks"
@@ -139,6 +140,7 @@ async def manager_verify_callback(update: Update, context: ContextTypes.DEFAULT_
         worker_text = f"{worker['name']} ({run['worker_role']})"
 
     if data.startswith(VERIFY_PREFIX):
+        was_already_finalized = run.get("status") in {"manager_verified", "manager_rejected"}
         updated_worker = None
         store.update_task_run(
             run_id,
@@ -166,7 +168,34 @@ async def manager_verify_callback(update: Update, context: ContextTypes.DEFAULT_
                 worker_notified = True
             except Exception:
                 logger.exception("Failed to notify worker after verify for run_id=%s", run_id)
-        await query.edit_message_text("Verified. Task completion is now recorded.")
+
+        dependent_fired = 0
+        if not was_already_finalized:
+            dependent_tasks = store.list_dependent_tasks(run["task_id"])
+            for dependent_task in dependent_tasks:
+                try:
+                    child_run = await scheduler.fire_task_now(
+                        context,
+                        dependent_task,
+                        triggered_by_run_id=run_id,
+                    )
+                    if child_run:
+                        dependent_fired += 1
+                except Exception:
+                    logger.exception(
+                        "Failed to fire dependent task task_id=%s parent_run_id=%s",
+                        dependent_task.get("id"),
+                        run_id,
+                    )
+
+        suffix = (
+            f"\nTriggered dependent tasks: {dependent_fired}"
+            if dependent_fired
+            else ""
+        )
+        await query.edit_message_text(
+            f"Verified. Task completion is now recorded.{suffix}"
+        )
         return
 
     if data.startswith(REJECT_PREFIX):
@@ -279,6 +308,10 @@ async def manager_action_callback(update: Update, context: ContextTypes.DEFAULT_
             ],
             [
                 InlineKeyboardButton("Weekly", callback_data=f"{MANAGER_TASK_RECURRENCE_PREFIX}weekly"),
+                InlineKeyboardButton(
+                    "After Another Task",
+                    callback_data=f"{MANAGER_TASK_RECURRENCE_PREFIX}after_task",
+                ),
             ],
         ]
         await query.edit_message_text(
@@ -313,11 +346,40 @@ async def manager_action_callback(update: Update, context: ContextTypes.DEFAULT_
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
             return
+        if recurrence == "after_task":
+            parent_tasks = store.list_parent_task_options(manager_id=manager["id"])
+            if not parent_tasks:
+                await query.edit_message_text(
+                    "No parent tasks available yet. Create a normal task first."
+                )
+                return
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        f"{task['title']} ({task['worker_role']})",
+                        callback_data=f"{MANAGER_TASK_PARENT_PREFIX}{task['id']}",
+                    )
+                ]
+                for task in parent_tasks
+            ]
+            await query.edit_message_text(
+                "Select parent task (this task will fire after parent verification):",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
 
         context.user_data["manager_state"] = "awaiting_task_time"
         await query.edit_message_text(
             "Send task time in 24h format HH:MM (example 10:30)."
         )
+        return
+
+    if data.startswith(MANAGER_TASK_PARENT_PREFIX):
+        parent_task_id = data.replace(MANAGER_TASK_PARENT_PREFIX, "", 1)
+        draft = context.user_data.get("manager_task_draft", {})
+        draft["depends_on_task_id"] = parent_task_id
+        context.user_data["manager_task_draft"] = draft
+        await _create_task_from_draft(query, context, manager["id"])
         return
 
     if data.startswith(MANAGER_TASK_WEEKDAY_PREFIX):
@@ -418,15 +480,28 @@ def _format_task_row(index: int, task: dict) -> str:
     weekly_text = ""
     if recurrence == "weekly" and weekday is not None and 0 <= weekday < len(WEEKDAYS):
         weekly_text = f" ({WEEKDAYS[weekday][0]})"
-    date_text = f"\n   Date: {task['scheduled_date']}" if task.get("scheduled_date") else ""
+    if recurrence == "after_task":
+        repeat_text = "after_task"
+        time_text = "After parent verification"
+        date_text = ""
+    else:
+        repeat_text = f"{recurrence}{weekly_text}"
+        time_text = task["time"]
+        date_text = f"\n   Date: {task['scheduled_date']}" if task.get("scheduled_date") else ""
     manager_text = f"   Manager: {task['manager_name']}\n" if task.get("manager_name") else ""
+    parent_text = (
+        f"\n   After: {task['parent_task_title']}"
+        if recurrence == "after_task" and task.get("parent_task_title")
+        else ""
+    )
     return (
         f"{index}. {task['title']}\n"
         f"   Worker Role: {task['worker_role']}\n"
         f"   Worker: {task['worker_name']}\n"
         f"{manager_text}"
-        f"   Time: {task['time']}\n"
-        f"   Repeat: {recurrence}{weekly_text}"
+        f"   Time: {time_text}\n"
+        f"   Repeat: {repeat_text}"
+        f"{parent_text}"
         f"{date_text}"
     )
 
@@ -589,6 +664,41 @@ def _once_schedule_is_future(date_value: str, time_value: str) -> bool:
         return False
 
 
+async def _create_task_from_draft(
+    target,
+    context: ContextTypes.DEFAULT_TYPE,
+    manager_id: str,
+) -> None:
+    draft = context.user_data.get("manager_task_draft", {})
+    try:
+        task = store.add_task(
+            title=draft["title"],
+            description=draft["description"],
+            worker_role=draft["worker_role"],
+            manager_id=manager_id,
+            time_hhmm=draft.get("time", "00:00"),
+            recurrence=draft.get("recurrence", "daily"),
+            weekday=draft.get("weekday"),
+            scheduled_date=draft.get("scheduled_date"),
+            depends_on_task_id=draft.get("depends_on_task_id"),
+        )
+        scheduler.schedule_task_job(context.application, task)
+        message = f"Task added and scheduled ({task['recurrence']})."
+        if hasattr(target, "edit_message_text"):
+            await target.edit_message_text(message)
+        else:
+            await target.reply_text(message)
+    except ValueError as exc:
+        message = f"Failed to add task: {exc}"
+        if hasattr(target, "edit_message_text"):
+            await target.edit_message_text(message)
+        else:
+            await target.reply_text(message)
+    finally:
+        context.user_data.pop("manager_state", None)
+        context.user_data.pop("manager_task_draft", None)
+
+
 async def manager_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_user or not update.message:
         return
@@ -669,26 +779,9 @@ async def manager_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     "The selected date/time is in the past. Send a future time."
                 )
                 return
-        try:
-            task = store.add_task(
-                title=draft["title"],
-                description=draft["description"],
-                worker_role=draft["worker_role"],
-                manager_id=manager["id"],
-                time_hhmm=text,
-                recurrence=draft.get("recurrence", "daily"),
-                weekday=draft.get("weekday"),
-                scheduled_date=draft.get("scheduled_date"),
-            )
-            scheduler.schedule_task_job(context.application, task)
-            await update.message.reply_text(
-                f"Task added and scheduled ({task['recurrence']})."
-            )
-        except ValueError as exc:
-            await update.message.reply_text(f"Failed to add task: {exc}")
-        finally:
-            context.user_data.pop("manager_state", None)
-            context.user_data.pop("manager_task_draft", None)
+        draft["time"] = text
+        context.user_data["manager_task_draft"] = draft
+        await _create_task_from_draft(update.message, context, manager["id"])
         return
 
     if state != "awaiting_fire_reason":

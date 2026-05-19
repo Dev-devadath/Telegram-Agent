@@ -67,10 +67,14 @@ def clear_all_task_jobs(application: Application) -> None:
 
 
 def schedule_task_job(application: Application, task: dict) -> None:
-    run_time = _parse_time(task["time"])
     for existing in application.job_queue.get_jobs_by_name(f"{TASK_JOB_PREFIX}{task['id']}"):
         existing.schedule_removal()
     recurrence = task.get("recurrence", "daily")
+    if recurrence == "after_task":
+        logger.info("Task %s is dependency-based and has no clock schedule.", task["id"])
+        return
+
+    run_time = _parse_time(task["time"])
     if recurrence == "once":
         application.job_queue.run_once(
             daily_task_callback,
@@ -109,6 +113,25 @@ def schedule_extension_for_run(application: Application, run_id: str, minutes: i
     )
 
 
+async def fire_task_now(
+    context: CallbackContext,
+    task: dict,
+    triggered_by_run_id: str | None = None,
+) -> dict | None:
+    if not task or not task.get("active", True):
+        return None
+    scheduled_for = datetime.utcnow().replace(microsecond=0).isoformat()
+    logger.info(
+        "Firing task_id=%s scheduled_for=%s triggered_by_run_id=%s",
+        task["id"],
+        scheduled_for,
+        triggered_by_run_id,
+    )
+    run = store.add_task_run(task, scheduled_for=scheduled_for)
+    await _send_run_to_worker(context, run)
+    return run
+
+
 async def daily_task_callback(context: CallbackContext) -> None:
     task_id = context.job.data["task_id"]
     task = store.get_task_by_id(task_id)
@@ -126,10 +149,7 @@ async def daily_task_callback(context: CallbackContext) -> None:
                 expected_weekday,
             )
             return
-    scheduled_for = datetime.utcnow().replace(microsecond=0).isoformat()
-    logger.info("Firing task_id=%s scheduled_for=%s", task_id, scheduled_for)
-    run = store.add_task_run(task, scheduled_for=scheduled_for)
-    await _send_run_to_worker(context, run)
+    await fire_task_now(context, task)
     if task.get("recurrence") == "once":
         store.update_task(task_id, {"active": False})
 

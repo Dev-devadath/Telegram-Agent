@@ -94,6 +94,7 @@ def _run_schema(conn) -> None:
             description text not null,
             worker_role text not null,
             manager_id text not null references users(id) on delete cascade,
+            depends_on_task_id text references tasks(id) on delete set null,
             time text not null,
             scheduled_date text,
             recurrence text not null default 'daily',
@@ -128,6 +129,7 @@ def _run_schema(conn) -> None:
         alter table users add constraint users_role_check
             check (role in ('admin', 'owner', 'manager', 'worker'));
         alter table tasks add column if not exists scheduled_date text;
+        alter table tasks add column if not exists depends_on_task_id text references tasks(id) on delete set null;
         alter table task_runs add column if not exists worker_note text;
 
         create table if not exists firings (
@@ -677,6 +679,7 @@ def add_task(
     recurrence: str = "daily",
     weekday: int | None = None,
     scheduled_date: str | None = None,
+    depends_on_task_id: str | None = None,
 ) -> dict[str, Any]:
     with _connect() as conn:
         role = conn.execute("select * from roles where name = %s", (worker_role,)).fetchone()
@@ -698,13 +701,33 @@ def add_task(
                 (manager_id, worker_role),
             )
 
+        if recurrence == "after_task":
+            if not depends_on_task_id:
+                raise ValueError("Parent task is required for dependent scheduling.")
+            parent_task = conn.execute(
+                """
+                select *
+                from tasks
+                where id = %s and manager_id = %s and active = true
+                limit 1
+                """,
+                (depends_on_task_id, manager_id),
+            ).fetchone()
+            if not parent_task:
+                raise ValueError("Parent task not found under this manager.")
+            time_hhmm = "00:00"
+            scheduled_date = None
+            weekday = None
+        elif depends_on_task_id:
+            raise ValueError("Parent task can be set only for dependent scheduling.")
+
         task = conn.execute(
             """
             insert into tasks (
-                id, title, description, worker_role, manager_id, time, scheduled_date,
-                recurrence, weekday, active, created_at
+                id, title, description, worker_role, manager_id, depends_on_task_id, time,
+                scheduled_date, recurrence, weekday, active, created_at
             )
-            values (%s, %s, %s, %s, %s, %s, %s, %s, %s, true, %s)
+            values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, true, %s)
             returning *
             """,
             (
@@ -713,6 +736,7 @@ def add_task(
                 description.strip(),
                 worker_role,
                 manager_id,
+                depends_on_task_id if recurrence == "after_task" else None,
                 time_hhmm,
                 scheduled_date,
                 recurrence,
@@ -873,15 +897,50 @@ def list_active_tasks() -> list[dict[str, Any]]:
         ).fetchall()
 
 
+def list_parent_task_options(manager_id: str | None = None) -> list[dict[str, Any]]:
+    query = """
+        select t.id, t.title, t.worker_role, t.manager_id
+        from tasks t
+        where t.active = true
+          and t.recurrence <> 'after_task'
+    """
+    params: list[Any] = []
+    if manager_id:
+        query += " and t.manager_id = %s"
+        params.append(manager_id)
+    query += " order by t.created_at"
+
+    with _connect() as conn:
+        return conn.execute(query, params).fetchall()
+
+
+def list_dependent_tasks(parent_task_id: str) -> list[dict[str, Any]]:
+    with _connect() as conn:
+        return conn.execute(
+            """
+            select *
+            from tasks
+            where active = true
+              and recurrence = 'after_task'
+              and depends_on_task_id = %s
+            order by created_at
+            """,
+            (parent_task_id,),
+        ).fetchall()
+
+
 def list_tasks_for_manager(manager_id: str) -> list[dict[str, Any]]:
     with _connect() as conn:
         return conn.execute(
             """
             select
                 t.*,
+                parent.title as parent_task_title,
                 coalesce(u.name, 'Unassigned') as worker_name,
                 u.telegram_id as worker_telegram_id
             from tasks t
+            left join tasks parent
+              on parent.id = t.depends_on_task_id
             left join users u
               on u.role = 'worker'
              and u.worker_role = t.worker_role
@@ -899,10 +958,13 @@ def list_tasks_for_owner(owner_id: str) -> list[dict[str, Any]]:
             """
             select
                 t.*,
+                parent.title as parent_task_title,
                 coalesce(u.name, 'Unassigned') as worker_name,
                 u.telegram_id as worker_telegram_id,
                 m.name as manager_name
             from tasks t
+            left join tasks parent
+              on parent.id = t.depends_on_task_id
             join users m
               on m.id = t.manager_id
              and m.role = 'manager'
@@ -930,6 +992,7 @@ def update_task(task_id: str, updates: dict[str, Any]) -> dict[str, Any]:
         "description",
         "worker_role",
         "manager_id",
+        "depends_on_task_id",
         "time",
         "scheduled_date",
         "recurrence",

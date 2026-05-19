@@ -30,6 +30,7 @@ ADMIN_TASK_ROLE_PREFIX = f"{ADMIN_PREFIX}task_role:"
 ADMIN_TASK_MANAGER_PREFIX = f"{ADMIN_PREFIX}task_manager:"
 ADMIN_TASK_RECURRENCE_PREFIX = f"{ADMIN_PREFIX}task_recurrence:"
 ADMIN_TASK_WEEKDAY_PREFIX = f"{ADMIN_PREFIX}task_weekday:"
+ADMIN_TASK_PARENT_PREFIX = f"{ADMIN_PREFIX}task_parent:"
 
 WEEKDAYS = [
     ("Monday", 0),
@@ -370,6 +371,10 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             ],
             [
                 InlineKeyboardButton("Weekly", callback_data=f"{ADMIN_TASK_RECURRENCE_PREFIX}weekly"),
+                InlineKeyboardButton(
+                    "After Another Task",
+                    callback_data=f"{ADMIN_TASK_RECURRENCE_PREFIX}after_task",
+                ),
             ],
         ]
         await query.edit_message_text(
@@ -404,11 +409,41 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
             return
+        if recurrence == "after_task":
+            manager_id = draft.get("manager_id")
+            parent_tasks = store.list_parent_task_options(manager_id=manager_id)
+            if not parent_tasks:
+                await query.edit_message_text(
+                    "No parent tasks available for this manager. Create a normal task first."
+                )
+                return
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        f"{task['title']} ({task['worker_role']})",
+                        callback_data=f"{ADMIN_TASK_PARENT_PREFIX}{task['id']}",
+                    )
+                ]
+                for task in parent_tasks
+            ]
+            await query.edit_message_text(
+                "Select parent task (this task will fire after parent verification):",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
 
         context.user_data["admin_state"] = "awaiting_task_time"
         await query.edit_message_text(
             "Send task time in 24h format HH:MM (example 10:30)."
         )
+        return
+
+    if data.startswith(ADMIN_TASK_PARENT_PREFIX):
+        parent_task_id = data.replace(ADMIN_TASK_PARENT_PREFIX, "", 1)
+        draft = context.user_data.get("task_draft", {})
+        draft["depends_on_task_id"] = parent_task_id
+        context.user_data["task_draft"] = draft
+        await _create_task_from_draft(query, context)
         return
 
     if data.startswith(ADMIN_TASK_WEEKDAY_PREFIX):
@@ -489,6 +524,37 @@ def _once_schedule_is_future(date_value: str, time_value: str) -> bool:
         return run_at > datetime.now()
     except Exception:
         return False
+
+
+async def _create_task_from_draft(target, context: ContextTypes.DEFAULT_TYPE) -> None:
+    draft = context.user_data.get("task_draft", {})
+    try:
+        task = store.add_task(
+            title=draft["title"],
+            description=draft["description"],
+            worker_role=draft["worker_role"],
+            manager_id=draft["manager_id"],
+            time_hhmm=draft.get("time", "00:00"),
+            recurrence=draft.get("recurrence", "daily"),
+            weekday=draft.get("weekday"),
+            scheduled_date=draft.get("scheduled_date"),
+            depends_on_task_id=draft.get("depends_on_task_id"),
+        )
+        scheduler.schedule_task_job(context.application, task)
+        message = f"Task added and scheduled ({task['recurrence']})."
+        if hasattr(target, "edit_message_text"):
+            await target.edit_message_text(message)
+        else:
+            await target.reply_text(message)
+    except ValueError as exc:
+        message = f"Failed to add task: {exc}"
+        if hasattr(target, "edit_message_text"):
+            await target.edit_message_text(message)
+        else:
+            await target.reply_text(message)
+    finally:
+        context.user_data.pop("task_draft", None)
+        context.user_data.pop("admin_state", None)
 
 
 async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -651,23 +717,5 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 )
                 return
         draft["time"] = text
-        try:
-            task = store.add_task(
-                title=draft["title"],
-                description=draft["description"],
-                worker_role=draft["worker_role"],
-                manager_id=draft["manager_id"],
-                time_hhmm=draft["time"],
-                recurrence=draft.get("recurrence", "daily"),
-                weekday=draft.get("weekday"),
-                scheduled_date=draft.get("scheduled_date"),
-            )
-            scheduler.schedule_task_job(context.application, task)
-            await update.message.reply_text(
-                f"Task added and scheduled ({task['recurrence']})."
-            )
-        except ValueError as exc:
-            await update.message.reply_text(f"Failed to add task: {exc}")
-        finally:
-            context.user_data.pop("task_draft", None)
-            context.user_data.pop("admin_state", None)
+        await _create_task_from_draft(update.message, context)
+        return
