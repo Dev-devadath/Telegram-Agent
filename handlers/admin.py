@@ -11,6 +11,7 @@ ADMIN_ADD_ROLE = f"{ADMIN_PREFIX}add_role"
 ADMIN_REMOVE_ROLE = f"{ADMIN_PREFIX}remove_role"
 ADMIN_ADD_MANAGER = f"{ADMIN_PREFIX}add_manager"
 ADMIN_ADD_OWNER = f"{ADMIN_PREFIX}add_owner"
+ADMIN_LIST_OWNERS = f"{ADMIN_PREFIX}list_owners"
 ADMIN_LIST_MANAGERS = f"{ADMIN_PREFIX}list_managers"
 ADMIN_REMOVE_MANAGER = f"{ADMIN_PREFIX}remove_manager"
 ADMIN_EDIT_MANAGER_PASSWORD_PREFIX = f"{ADMIN_PREFIX}edit_manager_password:"
@@ -51,6 +52,7 @@ def _panel_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("Remove Role", callback_data=ADMIN_REMOVE_ROLE)],
         [InlineKeyboardButton("Add Manager", callback_data=ADMIN_ADD_MANAGER)],
         [InlineKeyboardButton("Add Owner", callback_data=ADMIN_ADD_OWNER)],
+        [InlineKeyboardButton("List Owners", callback_data=ADMIN_LIST_OWNERS)],
         [InlineKeyboardButton("List Managers", callback_data=ADMIN_LIST_MANAGERS)],
         [InlineKeyboardButton("Remove Manager", callback_data=ADMIN_REMOVE_MANAGER)],
         [InlineKeyboardButton("Add Task", callback_data=ADMIN_ADD_TASK)],
@@ -143,6 +145,28 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
         context.user_data["admin_state"] = "awaiting_owner_telegram_id"
         await query.edit_message_text("Send owner Telegram ID.")
+        return
+
+    if data == ADMIN_LIST_OWNERS:
+        owners = store.list_users_by_role("owner")
+        if not owners:
+            await query.edit_message_text("No active owners available.")
+            return
+
+        owner_lines = []
+        for idx, owner in enumerate(owners, start=1):
+            managers = store.list_managers_for_owner(owner["id"])
+            manager_names = (
+                ", ".join(manager["name"] for manager in managers)
+                if managers
+                else "No managers assigned"
+            )
+            owner_lines.append(
+                f"{idx}. {owner['name']} ({owner['telegram_id']})\n"
+                f"   Managers: {manager_names}"
+            )
+
+        await query.edit_message_text("Active owners:\n\n" + "\n\n".join(owner_lines))
         return
 
     if data == ADMIN_LIST_MANAGERS:

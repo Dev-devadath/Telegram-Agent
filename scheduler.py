@@ -54,7 +54,7 @@ def _task_keyboard(run_id: str) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton("No", callback_data=f"task_no:{run_id}"),
-                InlineKeyboardButton("Extend 30 mins", callback_data=f"task_extend:{run_id}"),
+                InlineKeyboardButton("Extend", callback_data=f"task_extend:{run_id}"),
             ]
         ]
     )
@@ -104,7 +104,7 @@ def schedule_extension_for_run(application: Application, run_id: str, minutes: i
     application.job_queue.run_once(
         extension_task_callback,
         when=minutes * 60,
-        data={"run_id": run_id},
+        data={"run_id": run_id, "minutes": minutes},
         name=f"{EXTEND_JOB_PREFIX}{run_id}:{datetime.utcnow().timestamp()}",
     )
 
@@ -136,6 +136,7 @@ async def daily_task_callback(context: CallbackContext) -> None:
 
 async def extension_task_callback(context: CallbackContext) -> None:
     run_id = context.job.data["run_id"]
+    minutes = int(context.job.data.get("minutes", 30))
     run = store.get_task_run(run_id)
     if not run:
         return
@@ -143,9 +144,7 @@ async def extension_task_callback(context: CallbackContext) -> None:
         run_id,
         {
             "status": "sent_to_worker",
-            "scheduled_for": (datetime.utcnow() + timedelta(minutes=30))
-            .replace(microsecond=0)
-            .isoformat(),
+            "scheduled_for": datetime.utcnow().replace(microsecond=0).isoformat(),
         },
     )
     run = store.get_task_run(run_id)

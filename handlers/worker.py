@@ -1,5 +1,6 @@
 from datetime import datetime
 import logging
+import re
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -16,6 +17,45 @@ EXTEND_PREFIX = "task_extend:"
 VERIFY_PREFIX = "verify:"
 REJECT_PREFIX = "reject:"
 logger = logging.getLogger(__name__)
+
+
+def _completion_message(prefix: str = "Marked as done.") -> str:
+    return (
+        f"{prefix} Great work! 🎉✅\n"
+        "Thanks for completing the task. Sent to manager for verification."
+    )
+
+
+def _parse_extension_minutes(value: str) -> int | None:
+    match = re.fullmatch(
+        r"\s*(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)\s*",
+        value,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    amount = int(match.group(1))
+    unit = match.group(2).lower()
+    if amount <= 0:
+        return None
+    if unit in {"m", "min", "mins", "minute", "minutes"}:
+        return amount
+    if unit in {"h", "hr", "hrs", "hour", "hours"}:
+        return amount * 60
+    if unit in {"d", "day", "days"}:
+        return amount * 24 * 60
+    return None
+
+
+def _format_extension(minutes: int) -> str:
+    if minutes % (24 * 60) == 0:
+        days = minutes // (24 * 60)
+        return f"{days} day{'s' if days != 1 else ''}"
+    if minutes % 60 == 0:
+        hours = minutes // 60
+        return f"{hours} hour{'s' if hours != 1 else ''}"
+    return f"{minutes} minute{'s' if minutes != 1 else ''}"
 
 
 def _is_worker(telegram_id: int) -> bool:
@@ -53,7 +93,7 @@ async def task_response_callback(update: Update, context: ContextTypes.DEFAULT_T
                 "completed_at": datetime.utcnow().replace(microsecond=0).isoformat(),
             },
         )
-        await query.edit_message_text("Marked as done. Waiting for manager verification.")
+        await query.edit_message_text(_completion_message())
         await _notify_manager_for_verification(context, run_id)
         return
 
@@ -68,15 +108,11 @@ async def task_response_callback(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     if data.startswith(EXTEND_PREFIX):
-        scheduler.schedule_extension_for_run(context.application, run_id, 30)
-        store.update_task_run(
-            run_id,
-            {
-                "status": "extended",
-                "worker_response": "extend",
-            },
+        context.user_data["pending_extension_run_id"] = run_id
+        await query.edit_message_text(
+            "How long do you need to extend this task?\n"
+            "Send a duration like 2 hours, 1 day, 45 minutes, 3h, or 2d."
         )
-        await query.edit_message_text("Task extended by 30 minutes.")
         return
 
 
@@ -84,6 +120,29 @@ async def no_reason_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not update.effective_user or not update.message:
         return
     if not _is_worker(update.effective_user.id):
+        return
+
+    extension_run_id = context.user_data.get("pending_extension_run_id")
+    if extension_run_id:
+        minutes = _parse_extension_minutes(update.message.text)
+        if minutes is None:
+            await update.message.reply_text(
+                "Invalid duration. Send a value like 2 hours, 1 day, 45 minutes, 3h, or 2d."
+            )
+            return
+
+        scheduler.schedule_extension_for_run(context.application, extension_run_id, minutes)
+        store.update_task_run(
+            extension_run_id,
+            {
+                "status": "extended",
+                "worker_response": "extend",
+            },
+        )
+        context.user_data.pop("pending_extension_run_id", None)
+        await update.message.reply_text(
+            f"Task extended by {_format_extension(minutes)}. ⏰"
+        )
         return
 
     note_run_id = context.user_data.get("pending_yes_note_run_id")
@@ -99,9 +158,7 @@ async def no_reason_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             },
         )
         context.user_data.pop("pending_yes_note_run_id", None)
-        await update.message.reply_text(
-            "Note submitted. Sent to manager for verification."
-        )
+        await update.message.reply_text(_completion_message("Note submitted."))
         logger.info("Worker YES note captured for run_id=%s", note_run_id)
         await _notify_manager_for_verification(context, note_run_id)
         return
