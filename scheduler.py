@@ -50,12 +50,12 @@ def _task_keyboard(run_id: str) -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton("Yes", callback_data=f"task_yes:{run_id}"),
-                InlineKeyboardButton("Yes + Note", callback_data=f"task_yes_note:{run_id}"),
+                InlineKeyboardButton("No", callback_data=f"task_no:{run_id}"),
             ],
             [
-                InlineKeyboardButton("No", callback_data=f"task_no:{run_id}"),
+                InlineKeyboardButton("Note", callback_data=f"task_note:{run_id}"),
                 InlineKeyboardButton("Extend", callback_data=f"task_extend:{run_id}"),
-            ]
+            ],
         ]
     )
 

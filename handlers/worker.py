@@ -8,9 +8,8 @@ from telegram.ext import ContextTypes
 import scheduler
 import store
 
-TASK_PREFIX = "task_"
 YES_PREFIX = "task_yes:"
-YES_NOTE_PREFIX = "task_yes_note:"
+NOTE_PREFIX = "task_note:"
 NO_PREFIX = "task_no:"
 EXTEND_PREFIX = "task_extend:"
 
@@ -97,9 +96,9 @@ async def task_response_callback(update: Update, context: ContextTypes.DEFAULT_T
         await _notify_manager_for_verification(context, run_id)
         return
 
-    if data.startswith(YES_NOTE_PREFIX):
-        context.user_data["pending_yes_note_run_id"] = run_id
-        await query.edit_message_text("Please send the note for this completed task.")
+    if data.startswith(NOTE_PREFIX):
+        context.user_data["pending_note_run_id"] = run_id
+        await query.edit_message_text("Please send your note for this task.")
         return
 
     if data.startswith(NO_PREFIX):
@@ -145,22 +144,20 @@ async def no_reason_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return
 
-    note_run_id = context.user_data.get("pending_yes_note_run_id")
+    note_run_id = context.user_data.get("pending_note_run_id")
     if note_run_id:
         note = update.message.text.strip()
         store.update_task_run(
             note_run_id,
             {
-                "status": "worker_done",
-                "worker_response": "yes",
+                "worker_response": "note",
                 "worker_note": note,
-                "completed_at": datetime.utcnow().replace(microsecond=0).isoformat(),
             },
         )
-        context.user_data.pop("pending_yes_note_run_id", None)
-        await update.message.reply_text(_completion_message("Note submitted."))
-        logger.info("Worker YES note captured for run_id=%s", note_run_id)
-        await _notify_manager_for_verification(context, note_run_id)
+        context.user_data.pop("pending_note_run_id", None)
+        await update.message.reply_text("Note sent to your manager. 📝")
+        logger.info("Worker note captured for run_id=%s", note_run_id)
+        await _notify_manager_note(context, note_run_id)
         return
 
     run_id = context.user_data.get("pending_no_reason_run_id")
@@ -228,6 +225,43 @@ async def _notify_manager_for_verification(
     )
     logger.info(
         "Manager verification request sent for run_id=%s to manager_chat_id=%s",
+        run_id,
+        manager["telegram_id"],
+    )
+
+
+async def _notify_manager_note(
+    context: ContextTypes.DEFAULT_TYPE,
+    run_id: str,
+) -> None:
+    run = store.get_task_run(run_id)
+    if not run:
+        return
+    task = store.get_task_by_id(run["task_id"])
+    manager = store.get_user_by_id(run["manager_id"])
+    worker = store.get_user_by_role(run["worker_role"])
+    if not task or not manager:
+        logger.warning(
+            "Cannot notify manager note for run_id=%s (task_found=%s manager_found=%s)",
+            run_id,
+            bool(task),
+            bool(manager),
+        )
+        return
+
+    worker_name = worker["name"] if worker else run["worker_role"]
+    text = (
+        f"Worker note received.\n"
+        f"Role: {run['worker_role']} ({worker_name})\n"
+        f"Task: {task['title']}\n"
+        f"Note: {run.get('worker_note', '')}"
+    )
+    await context.bot.send_message(
+        chat_id=manager["telegram_id"],
+        text=text,
+    )
+    logger.info(
+        "Manager note notification sent for run_id=%s to manager_chat_id=%s",
         run_id,
         manager["telegram_id"],
     )

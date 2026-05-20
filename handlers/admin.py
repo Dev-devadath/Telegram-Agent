@@ -14,7 +14,15 @@ ADMIN_ADD_OWNER = f"{ADMIN_PREFIX}add_owner"
 ADMIN_LIST_OWNERS = f"{ADMIN_PREFIX}list_owners"
 ADMIN_LIST_MANAGERS = f"{ADMIN_PREFIX}list_managers"
 ADMIN_REMOVE_MANAGER = f"{ADMIN_PREFIX}remove_manager"
+ADMIN_EDIT_MANAGER_MENU_PREFIX = f"{ADMIN_PREFIX}edit_manager_menu:"
+ADMIN_EDIT_MANAGER_NAME_PREFIX = f"{ADMIN_PREFIX}edit_manager_name:"
+ADMIN_EDIT_MANAGER_TGID_PREFIX = f"{ADMIN_PREFIX}edit_manager_tgid:"
 ADMIN_EDIT_MANAGER_PASSWORD_PREFIX = f"{ADMIN_PREFIX}edit_manager_password:"
+ADMIN_EDIT_OWNER_MENU_PREFIX = f"{ADMIN_PREFIX}edit_owner_menu:"
+ADMIN_EDIT_OWNER_NAME_PREFIX = f"{ADMIN_PREFIX}edit_owner_name:"
+ADMIN_EDIT_OWNER_TGID_PREFIX = f"{ADMIN_PREFIX}edit_owner_tgid:"
+ADMIN_REMOVE_OWNER_PREFIX = f"{ADMIN_PREFIX}remove_owner:"
+ADMIN_REMOVE_OWNER_CONFIRM_PREFIX = f"{ADMIN_PREFIX}remove_owner_confirm:"
 ADMIN_ADD_TASK = f"{ADMIN_PREFIX}add_task"
 ADMIN_REPORT = f"{ADMIN_PREFIX}report"
 ADMIN_TESTMODE = f"{ADMIN_PREFIX}testmode"
@@ -54,7 +62,7 @@ def _panel_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("Add Manager", callback_data=ADMIN_ADD_MANAGER)],
         [InlineKeyboardButton("Add Owner", callback_data=ADMIN_ADD_OWNER)],
         [InlineKeyboardButton("List Owners", callback_data=ADMIN_LIST_OWNERS)],
-        [InlineKeyboardButton("List Managers", callback_data=ADMIN_LIST_MANAGERS)],
+        [InlineKeyboardButton("List / Edit Managers", callback_data=ADMIN_LIST_MANAGERS)],
         [InlineKeyboardButton("Remove Manager", callback_data=ADMIN_REMOVE_MANAGER)],
         [InlineKeyboardButton("Add Task", callback_data=ADMIN_ADD_TASK)],
         [InlineKeyboardButton("Reports", callback_data=ADMIN_REPORT)],
@@ -155,6 +163,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
 
         owner_lines = []
+        keyboard = []
         for idx, owner in enumerate(owners, start=1):
             managers = store.list_managers_for_owner(owner["id"])
             manager_names = (
@@ -166,8 +175,25 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 f"{idx}. {owner['name']} ({owner['telegram_id']})\n"
                 f"   Managers: {manager_names}"
             )
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        f"Edit {owner['name']}",
+                        callback_data=f"{ADMIN_EDIT_OWNER_MENU_PREFIX}{owner['id']}",
+                    ),
+                    InlineKeyboardButton(
+                        f"Remove {owner['name']}",
+                        callback_data=f"{ADMIN_REMOVE_OWNER_PREFIX}{owner['id']}",
+                    ),
+                ]
+            )
 
-        await query.edit_message_text("Active owners:\n\n" + "\n\n".join(owner_lines))
+        await query.edit_message_text(
+            "Active owners:\n\n"
+            + "\n\n".join(owner_lines)
+            + "\n\nSelect an owner below to edit or remove:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
         return
 
     if data == ADMIN_LIST_MANAGERS:
@@ -192,8 +218,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             keyboard.append(
                 [
                     InlineKeyboardButton(
-                        f"Edit password - {manager['name']}",
-                        callback_data=f"{ADMIN_EDIT_MANAGER_PASSWORD_PREFIX}{manager['id']}",
+                        f"Edit {manager['name']}",
+                        callback_data=f"{ADMIN_EDIT_MANAGER_MENU_PREFIX}{manager['id']}",
                     )
                 ]
             )
@@ -201,8 +227,69 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await query.edit_message_text(
             "Active managers:\n"
             + "\n".join(manager_lines)
-            + "\n\nSelect a manager below to set/update password:",
+            + "\n\nSelect a manager below to edit:",
             reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data.startswith(ADMIN_EDIT_MANAGER_MENU_PREFIX):
+        manager_id = data.replace(ADMIN_EDIT_MANAGER_MENU_PREFIX, "", 1)
+        manager = store.get_user_by_id(manager_id)
+        if not manager or manager.get("role") != "manager":
+            await query.edit_message_text("Manager not found.")
+            return
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "Edit name",
+                    callback_data=f"{ADMIN_EDIT_MANAGER_NAME_PREFIX}{manager_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "Edit Telegram ID",
+                    callback_data=f"{ADMIN_EDIT_MANAGER_TGID_PREFIX}{manager_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "Edit password",
+                    callback_data=f"{ADMIN_EDIT_MANAGER_PASSWORD_PREFIX}{manager_id}",
+                )
+            ],
+            [InlineKeyboardButton("Back to managers", callback_data=ADMIN_LIST_MANAGERS)],
+        ]
+        await query.edit_message_text(
+            f"Edit manager: {manager['name']}\n"
+            f"Telegram ID: {manager['telegram_id']}\n"
+            f"Password: {'set' if manager.get('manager_password') else 'not set'}",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data.startswith(ADMIN_EDIT_MANAGER_NAME_PREFIX):
+        manager_id = data.replace(ADMIN_EDIT_MANAGER_NAME_PREFIX, "", 1)
+        manager = store.get_user_by_id(manager_id)
+        if not manager or manager.get("role") != "manager":
+            await query.edit_message_text("Manager not found.")
+            return
+        context.user_data["admin_state"] = "awaiting_edit_manager_name"
+        context.user_data["edit_manager_id"] = manager_id
+        await query.edit_message_text(
+            f"Send new name for manager {manager['name']}."
+        )
+        return
+
+    if data.startswith(ADMIN_EDIT_MANAGER_TGID_PREFIX):
+        manager_id = data.replace(ADMIN_EDIT_MANAGER_TGID_PREFIX, "", 1)
+        manager = store.get_user_by_id(manager_id)
+        if not manager or manager.get("role") != "manager":
+            await query.edit_message_text("Manager not found.")
+            return
+        context.user_data["admin_state"] = "awaiting_edit_manager_telegram_id"
+        context.user_data["edit_manager_id"] = manager_id
+        await query.edit_message_text(
+            f"Send new Telegram ID for manager {manager['name']}."
         )
         return
 
@@ -213,10 +300,93 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await query.edit_message_text("Manager not found.")
             return
         context.user_data["admin_state"] = "awaiting_manager_password_update"
-        context.user_data["password_manager_id"] = manager_id
+        context.user_data["edit_manager_id"] = manager_id
         await query.edit_message_text(
             f"Send new registration password for manager {manager['name']}."
         )
+        return
+
+    if data.startswith(ADMIN_EDIT_OWNER_MENU_PREFIX):
+        owner_id = data.replace(ADMIN_EDIT_OWNER_MENU_PREFIX, "", 1)
+        owner = store.get_user_by_id(owner_id)
+        if not owner or owner.get("role") != "owner":
+            await query.edit_message_text("Owner not found.")
+            return
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "Edit name",
+                    callback_data=f"{ADMIN_EDIT_OWNER_NAME_PREFIX}{owner_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "Edit Telegram ID",
+                    callback_data=f"{ADMIN_EDIT_OWNER_TGID_PREFIX}{owner_id}",
+                )
+            ],
+            [InlineKeyboardButton("Back to owners", callback_data=ADMIN_LIST_OWNERS)],
+        ]
+        await query.edit_message_text(
+            f"Edit owner: {owner['name']}\nTelegram ID: {owner['telegram_id']}",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data.startswith(ADMIN_EDIT_OWNER_NAME_PREFIX):
+        owner_id = data.replace(ADMIN_EDIT_OWNER_NAME_PREFIX, "", 1)
+        owner = store.get_user_by_id(owner_id)
+        if not owner or owner.get("role") != "owner":
+            await query.edit_message_text("Owner not found.")
+            return
+        context.user_data["admin_state"] = "awaiting_edit_owner_name"
+        context.user_data["edit_owner_id"] = owner_id
+        await query.edit_message_text(f"Send new name for owner {owner['name']}.")
+        return
+
+    if data.startswith(ADMIN_EDIT_OWNER_TGID_PREFIX):
+        owner_id = data.replace(ADMIN_EDIT_OWNER_TGID_PREFIX, "", 1)
+        owner = store.get_user_by_id(owner_id)
+        if not owner or owner.get("role") != "owner":
+            await query.edit_message_text("Owner not found.")
+            return
+        context.user_data["admin_state"] = "awaiting_edit_owner_telegram_id"
+        context.user_data["edit_owner_id"] = owner_id
+        await query.edit_message_text(
+            f"Send new Telegram ID for owner {owner['name']}."
+        )
+        return
+
+    if data.startswith(ADMIN_REMOVE_OWNER_PREFIX):
+        owner_id = data.replace(ADMIN_REMOVE_OWNER_PREFIX, "", 1)
+        owner = store.get_user_by_id(owner_id)
+        if not owner or owner.get("role") != "owner":
+            await query.edit_message_text("Owner not found.")
+            return
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "Confirm Remove",
+                    callback_data=f"{ADMIN_REMOVE_OWNER_CONFIRM_PREFIX}{owner_id}",
+                )
+            ],
+            [InlineKeyboardButton("Cancel", callback_data=ADMIN_LIST_OWNERS)],
+        ]
+        await query.edit_message_text(
+            f"Remove owner {owner['name']}?\n"
+            "Managers under this owner will be unassigned from the owner.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data.startswith(ADMIN_REMOVE_OWNER_CONFIRM_PREFIX):
+        owner_id = data.replace(ADMIN_REMOVE_OWNER_CONFIRM_PREFIX, "", 1)
+        try:
+            owner = store.remove_owner(owner_id)
+        except ValueError as exc:
+            await query.edit_message_text(f"Failed to remove owner: {exc}")
+            return
+        await query.edit_message_text(f"Owner removed: {owner['name']}")
         return
 
     if data.startswith(ADMIN_OWNER_MANAGER_PREFIX):
@@ -624,12 +794,62 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data.pop("admin_state", None)
         return
 
-    if state == "awaiting_manager_password_update":
-        manager_id = context.user_data.pop("password_manager_id", None)
+    if state == "awaiting_edit_manager_name":
+        manager_id = context.user_data.pop("edit_manager_id", None)
         try:
-            manager = store.update_manager_password(manager_id, text)
+            manager = store.update_manager(manager_id, name=text)
+            await update.message.reply_text(f"Manager name updated to {manager['name']}.")
+        except ValueError as exc:
+            await update.message.reply_text(f"Failed: {exc}")
+        context.user_data.pop("admin_state", None)
+        return
+
+    if state == "awaiting_edit_manager_telegram_id":
+        if not text.isdigit():
+            await update.message.reply_text("Telegram ID must be numeric. Send again.")
+            return
+        manager_id = context.user_data.pop("edit_manager_id", None)
+        try:
+            manager = store.update_manager(manager_id, telegram_id=int(text))
+            await update.message.reply_text(
+                f"Manager Telegram ID updated to {manager['telegram_id']}."
+            )
+        except ValueError as exc:
+            await update.message.reply_text(f"Failed: {exc}")
+        context.user_data.pop("admin_state", None)
+        return
+
+    if state == "awaiting_manager_password_update":
+        manager_id = context.user_data.pop("edit_manager_id", None)
+        try:
+            manager = store.update_manager(manager_id, password=text)
             await update.message.reply_text(
                 f"Password updated for manager {manager['name']}."
+            )
+        except ValueError as exc:
+            await update.message.reply_text(f"Failed: {exc}")
+        context.user_data.pop("admin_state", None)
+        return
+
+    if state == "awaiting_edit_owner_name":
+        owner_id = context.user_data.pop("edit_owner_id", None)
+        try:
+            owner = store.update_owner(owner_id, name=text)
+            await update.message.reply_text(f"Owner name updated to {owner['name']}.")
+        except ValueError as exc:
+            await update.message.reply_text(f"Failed: {exc}")
+        context.user_data.pop("admin_state", None)
+        return
+
+    if state == "awaiting_edit_owner_telegram_id":
+        if not text.isdigit():
+            await update.message.reply_text("Telegram ID must be numeric. Send again.")
+            return
+        owner_id = context.user_data.pop("edit_owner_id", None)
+        try:
+            owner = store.update_owner(owner_id, telegram_id=int(text))
+            await update.message.reply_text(
+                f"Owner Telegram ID updated to {owner['telegram_id']}."
             )
         except ValueError as exc:
             await update.message.reply_text(f"Failed: {exc}")

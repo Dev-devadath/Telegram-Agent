@@ -103,7 +103,7 @@ def main() -> None:
 
     app.add_handler(CallbackQueryHandler(register_role_callback, pattern=f"^{REGISTER_ROLE_PREFIX}"))
     app.add_handler(CallbackQueryHandler(demo_callback, pattern=r"^demo_(yes|no|verify|reject)$"))
-    app.add_handler(CallbackQueryHandler(task_response_callback, pattern=r"^task_(yes_note|yes|no|extend):"))
+    app.add_handler(CallbackQueryHandler(task_response_callback, pattern=r"^task_(note|yes|no|extend):"))
     app.add_handler(CallbackQueryHandler(manager_verify_callback, pattern=r"^(verify|reject):"))
     app.add_handler(CallbackQueryHandler(manager_action_callback, pattern=r"^manager:"))
     app.add_handler(CallbackQueryHandler(owner_action_callback, pattern=r"^owner:"))

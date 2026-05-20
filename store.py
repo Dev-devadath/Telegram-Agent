@@ -494,38 +494,177 @@ def get_unclaimed_roles_for_manager(manager_id: str) -> list[str]:
     return [row["name"] for row in rows]
 
 
+def _ensure_telegram_available_for_role(
+    conn,
+    telegram_id: int,
+    role: str,
+    exclude_user_id: str | None = None,
+) -> None:
+    same_role_query = """
+        select 1 from users
+        where telegram_id = %s and role = %s and active = true
+    """
+    same_role_params: list[Any] = [telegram_id, role]
+    if exclude_user_id:
+        same_role_query += " and id <> %s"
+        same_role_params.append(exclude_user_id)
+    same_role_query += " limit 1"
+    if conn.execute(same_role_query, same_role_params).fetchone():
+        raise ValueError(f"Telegram ID is already registered as {role}.")
+
+    settings = get_settings()
+    any_query = "select id from users where telegram_id = %s and active = true"
+    any_params: list[Any] = [telegram_id]
+    if exclude_user_id:
+        any_query += " and id <> %s"
+        any_params.append(exclude_user_id)
+    any_query += " limit 1"
+    existing_any = conn.execute(any_query, any_params).fetchone()
+    if not settings.get("test_mode"):
+        if existing_any:
+            raise ValueError("Telegram ID already registered.")
+    elif existing_any and telegram_id != settings.get("test_telegram_id"):
+        raise ValueError("Telegram ID already registered.")
+
+
 def update_manager_password(manager_id: str, password: str) -> dict[str, Any]:
-    password = _normalize_password(password)
-    if not password:
-        raise ValueError("Manager password is required.")
+    return update_manager(manager_id, password=password)
+
+
+def update_manager(
+    manager_id: str,
+    name: str | None = None,
+    telegram_id: int | None = None,
+    password: str | None = None,
+) -> dict[str, Any]:
+    updates: dict[str, Any] = {}
+    if name is not None:
+        name = name.strip()
+        if not name:
+            raise ValueError("Manager name cannot be empty.")
+        updates["name"] = name
+    if telegram_id is not None:
+        updates["telegram_id"] = telegram_id
+    if password is not None:
+        password = _normalize_password(password)
+        if not password:
+            raise ValueError("Manager password is required.")
+        updates["manager_password"] = password
+
+    if not updates:
+        manager = get_user_by_id(manager_id)
+        if not manager or manager.get("role") != "manager":
+            raise ValueError("Manager not found.")
+        return manager
 
     with _connect() as conn:
-        password_taken = conn.execute(
-            """
-            select 1 from users
-            where id <> %s
-              and role = 'manager'
-              and active = true
-              and manager_password = %s
-            limit 1
-            """,
-            (manager_id, password),
-        ).fetchone()
-        if password_taken:
-            raise ValueError("Manager password is already used.")
-
         manager = conn.execute(
-            """
-            update users
-            set manager_password = %s
-            where id = %s and role = 'manager' and active = true
-            returning *
-            """,
-            (password, manager_id),
+            "select * from users where id = %s and role = 'manager' and active = true",
+            (manager_id,),
         ).fetchone()
         if not manager:
             raise ValueError("Manager not found.")
-        return manager
+
+        if telegram_id is not None:
+            _ensure_telegram_available_for_role(
+                conn, telegram_id, "manager", exclude_user_id=manager_id
+            )
+
+        if password is not None:
+            password_taken = conn.execute(
+                """
+                select 1 from users
+                where id <> %s
+                  and role = 'manager'
+                  and active = true
+                  and manager_password = %s
+                limit 1
+                """,
+                (manager_id, password),
+            ).fetchone()
+            if password_taken:
+                raise ValueError("Manager password is already used.")
+
+        assignments = ", ".join(f"{field} = %s" for field in updates)
+        values = [updates[field] for field in updates]
+        values.append(manager_id)
+        return conn.execute(
+            f"update users set {assignments} where id = %s returning *",
+            values,
+        ).fetchone()
+
+
+def update_owner(
+    owner_id: str,
+    name: str | None = None,
+    telegram_id: int | None = None,
+) -> dict[str, Any]:
+    updates: dict[str, Any] = {}
+    if name is not None:
+        name = name.strip()
+        if not name:
+            raise ValueError("Owner name cannot be empty.")
+        updates["name"] = name
+    if telegram_id is not None:
+        updates["telegram_id"] = telegram_id
+
+    if not updates:
+        owner = get_user_by_id(owner_id)
+        if not owner or owner.get("role") != "owner":
+            raise ValueError("Owner not found.")
+        return owner
+
+    with _connect() as conn:
+        owner = conn.execute(
+            "select * from users where id = %s and role = 'owner' and active = true",
+            (owner_id,),
+        ).fetchone()
+        if not owner:
+            raise ValueError("Owner not found.")
+
+        if telegram_id is not None:
+            _ensure_telegram_available_for_role(
+                conn, telegram_id, "owner", exclude_user_id=owner_id
+            )
+
+        assignments = ", ".join(f"{field} = %s" for field in updates)
+        values = [updates[field] for field in updates]
+        values.append(owner_id)
+        return conn.execute(
+            f"update users set {assignments} where id = %s returning *",
+            values,
+        ).fetchone()
+
+
+def remove_owner(owner_id: str) -> dict[str, Any]:
+    with _connect() as conn:
+        owner = conn.execute(
+            "select * from users where id = %s and role = 'owner' and active = true",
+            (owner_id,),
+        ).fetchone()
+        if not owner:
+            raise ValueError("Active owner not found.")
+
+        removed_at = _now_iso()
+        conn.execute(
+            """
+            update users
+            set owner_id = null
+            where role = 'manager' and active = true and owner_id = %s
+            """,
+            (owner_id,),
+        )
+        conn.execute(
+            """
+            update users
+            set active = false,
+                removed_at = %s,
+                removed_by_admin_reason = 'Removed by admin'
+            where id = %s
+            """,
+            (removed_at, owner_id),
+        )
+        return owner
 
 
 def add_role(role_name: str, manager_id: str | None = None) -> None:
