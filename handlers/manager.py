@@ -1,11 +1,14 @@
 from datetime import datetime, time
 import logging
+from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+import db_async
 import scheduler
 import store
+from performance import OperationTimer
 
 logger = logging.getLogger(__name__)
 
@@ -44,26 +47,28 @@ WEEKDAYS = [
 ]
 
 
-def _can_view_reports(telegram_id: int) -> bool:
-    return store.telegram_has_role(telegram_id, "admin") or store.telegram_has_role(
-        telegram_id, "manager"
-    ) or store.telegram_has_role(
-        telegram_id, "owner"
+async def _can_view_reports(telegram_id: int) -> bool:
+    return await db_async.db_call(
+        store.telegram_has_any_role,
+        telegram_id,
+        ["admin", "manager", "owner"],
     )
 
 
-def _can_verify_task(telegram_id: int) -> bool:
-    return store.telegram_has_role(telegram_id, "admin") or store.telegram_has_role(
-        telegram_id, "manager"
+async def _can_verify_task(telegram_id: int) -> bool:
+    return await db_async.db_call(
+        store.telegram_has_any_role,
+        telegram_id,
+        ["admin", "manager"],
     )
 
 
-def _get_manager_user(telegram_id: int) -> dict | None:
-    return store.get_user_by_telegram_and_role(telegram_id, "manager")
+async def _get_manager_user(telegram_id: int) -> dict | None:
+    return await db_async.db_call(store.get_user_by_telegram_and_role, telegram_id, "manager")
 
 
-def _get_owner_user(telegram_id: int) -> dict | None:
-    return store.get_user_by_telegram_and_role(telegram_id, "owner")
+async def _get_owner_user(telegram_id: int) -> dict | None:
+    return await db_async.db_call(store.get_user_by_telegram_and_role, telegram_id, "owner")
 
 
 def manager_menu_markup() -> InlineKeyboardMarkup:
@@ -90,7 +95,7 @@ def owner_menu_markup() -> InlineKeyboardMarkup:
 async def manager_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_user or not update.message:
         return
-    manager = _get_manager_user(update.effective_user.id)
+    manager = await _get_manager_user(update.effective_user.id)
     if not manager:
         await update.message.reply_text("Only managers can use this command.")
         return
@@ -104,7 +109,7 @@ async def manager_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_user or not update.message:
         return
-    owner = _get_owner_user(update.effective_user.id)
+    owner = await _get_owner_user(update.effective_user.id)
     if not owner:
         await update.message.reply_text("Only owners can use this command.")
         return
@@ -119,134 +124,111 @@ async def manager_verify_callback(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     if not query or not query.from_user:
         return
-    if not _can_verify_task(query.from_user.id):
-        await query.answer("Not allowed.", show_alert=True)
-        return
     await query.answer()
 
-    data = query.data
-    run_id = data.split(":", maxsplit=1)[1]
-    run = store.get_task_run(run_id)
-    if not run:
-        await query.edit_message_text("Task run not found.")
-        return
+    with OperationTimer("manager.verify_callback", user_id=query.from_user.id):
+        if not await _can_verify_task(query.from_user.id):
+            await query.edit_message_text("Not allowed.")
+            return
 
-    worker = store.get_user_by_role(run["worker_role"])
-    task = store.get_task_by_id(run["task_id"])
-    task_title = task["title"] if task else "Task"
-    worker_text = run["worker_role"]
-    worker_notified = False
-    if worker:
-        worker_text = f"{worker['name']} ({run['worker_role']})"
+        data = query.data
+        run_id = data.split(":", maxsplit=1)[1]
 
-    if data.startswith(VERIFY_PREFIX):
-        was_already_finalized = run.get("status") in {"manager_verified", "manager_rejected"}
-        updated_worker = None
-        store.update_task_run(
-            run_id,
-            {
-                "status": "manager_verified",
-                "manager_status": "verified",
-                "verified_at": datetime.utcnow().replace(microsecond=0).isoformat(),
-            },
-        )
-        if worker:
-            if run.get("status") not in {"manager_verified", "manager_rejected"}:
-                updated_worker = store.adjust_worker_points(worker["id"], 1)
-            try:
-                await context.bot.send_message(
-                    chat_id=worker["telegram_id"],
-                    text=(
-                        f"Manager verified your update.\n"
-                        f"Task: {task_title}\n"
-                        f"Role: {run['worker_role']}\n"
-                        "Status: Accepted.\n"
-                        "+1 point added.\n"
-                        f"Current points: {(updated_worker or worker).get('points', 0)}"
-                    ),
-                )
-                worker_notified = True
-            except Exception:
-                logger.exception("Failed to notify worker after verify for run_id=%s", run_id)
+        if data.startswith(VERIFY_PREFIX):
+            result = await db_async.db_call(store.verify_task_run, run_id)
+            run = result["run"]
+            task = result["task"]
+            worker = result["worker"]
+            updated_worker = result["updated_worker"]
+            task_title = task["title"] if task else "Task"
+            worker_text = run["worker_role"]
+            if worker:
+                worker_text = f"{worker['name']} ({run['worker_role']})"
 
-        dependent_fired = 0
-        if not was_already_finalized:
-            dependent_tasks = store.list_dependent_tasks(run["task_id"])
-            for dependent_task in dependent_tasks:
+            if worker:
                 try:
-                    child_run = await scheduler.fire_task_now(
-                        context,
-                        dependent_task,
-                        triggered_by_run_id=run_id,
+                    await context.bot.send_message(
+                        chat_id=worker["telegram_id"],
+                        text=(
+                            f"Manager verified your update.\n"
+                            f"Task: {task_title}\n"
+                            f"Role: {run['worker_role']}\n"
+                            "Status: Accepted.\n"
+                            "+1 point added.\n"
+                            f"Current points: {(updated_worker or worker).get('points', 0)}"
+                        ),
                     )
-                    if child_run:
-                        dependent_fired += 1
                 except Exception:
                     logger.exception(
-                        "Failed to fire dependent task task_id=%s parent_run_id=%s",
-                        dependent_task.get("id"),
-                        run_id,
+                        "Failed to notify worker after verify for run_id=%s", run_id
                     )
 
-        suffix = (
-            f"\nTriggered dependent tasks: {dependent_fired}"
-            if dependent_fired
-            else ""
-        )
-        await query.edit_message_text(
-            f"Verified. Task completion is now recorded.{suffix}"
-        )
-        return
-
-    if data.startswith(REJECT_PREFIX):
-        updated_worker = None
-        store.update_task_run(
-            run_id,
-            {
-                "status": "manager_rejected",
-                "manager_status": "rejected",
-                "verified_at": datetime.utcnow().replace(microsecond=0).isoformat(),
-            },
-        )
-        if worker:
-            if run.get("status") not in {"manager_verified", "manager_rejected"}:
-                updated_worker = store.adjust_worker_points(worker["id"], -2)
-            try:
-                await context.bot.send_message(
-                    chat_id=worker["telegram_id"],
-                    text=(
-                        f"Manager rejected your update.\n"
-                        f"Task: {task_title}\n"
-                        f"Role: {run['worker_role']}\n"
-                        "Status: Rejected. Please coordinate with your manager.\n"
-                        "-2 points deducted.\n"
-                        f"Current points: {(updated_worker or worker).get('points', 0)}"
-                    ),
+            dependent_tasks = result["dependent_tasks"]
+            if dependent_tasks and not result["was_already_finalized"]:
+                await query.edit_message_text(
+                    "Verified. Task completion is now recorded.\n"
+                    "Triggering dependent tasks..."
                 )
-                worker_notified = True
-            except Exception:
-                logger.exception("Failed to notify worker after reject for run_id=%s", run_id)
-        await query.edit_message_text(
-            (
-                f"Rejected for {worker_text}. Worker has been notified."
-                if worker_notified
-                else f"Rejected for {worker_text}. Worker notification failed."
+                context.application.create_task(
+                    scheduler.fire_dependent_tasks_background(
+                        context,
+                        dependent_tasks,
+                        run_id,
+                    )
+                )
+            else:
+                await query.edit_message_text("Verified. Task completion is now recorded.")
+            return
+
+        if data.startswith(REJECT_PREFIX):
+            result = await db_async.db_call(store.reject_task_run, run_id)
+            run = result["run"]
+            task = result["task"]
+            worker = result["worker"]
+            updated_worker = result["updated_worker"]
+            task_title = task["title"] if task else "Task"
+            worker_text = run["worker_role"]
+            worker_notified = False
+            if worker:
+                worker_text = f"{worker['name']} ({run['worker_role']})"
+                try:
+                    await context.bot.send_message(
+                        chat_id=worker["telegram_id"],
+                        text=(
+                            f"Manager rejected your update.\n"
+                            f"Task: {task_title}\n"
+                            f"Role: {run['worker_role']}\n"
+                            "Status: Rejected. Please coordinate with your manager.\n"
+                            "-2 points deducted.\n"
+                            f"Current points: {(updated_worker or worker).get('points', 0)}"
+                        ),
+                    )
+                    worker_notified = True
+                except Exception:
+                    logger.exception(
+                        "Failed to notify worker after reject for run_id=%s", run_id
+                    )
+            await query.edit_message_text(
+                (
+                    f"Rejected for {worker_text}. Worker has been notified."
+                    if worker_notified
+                    else f"Rejected for {worker_text}. Worker notification failed."
+                )
             )
-        )
-        return
+            return
 
 
 async def manager_action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query or not query.from_user:
         return
+    await query.answer()
 
-    manager = _get_manager_user(query.from_user.id)
+    manager = await _get_manager_user(query.from_user.id)
     if not manager:
-        await query.answer("Only managers can do this.", show_alert=True)
+        await query.edit_message_text("Only managers can do this.")
         return
 
-    await query.answer()
     data = query.data
 
     if data == MANAGER_ADD_ROLE:
@@ -255,7 +237,7 @@ async def manager_action_callback(update: Update, context: ContextTypes.DEFAULT_
         return
 
     if data == MANAGER_ADD_TASK:
-        roles = store.list_roles_for_manager(manager["id"])
+        roles = await db_async.db_call(store.list_roles_for_manager, manager["id"])
         if not roles:
             await query.edit_message_text(
                 "No roles are under you yet. Use /manager -> Add Role first."
@@ -276,7 +258,7 @@ async def manager_action_callback(update: Update, context: ContextTypes.DEFAULT_
         return
 
     if data == MANAGER_FIRE_WORKER:
-        workers = store.list_workers_under_manager(manager["id"])
+        workers = await db_async.db_call(store.list_workers_under_manager, manager["id"])
         if not workers:
             await query.edit_message_text("No active workers are assigned under you.")
             return
@@ -347,7 +329,10 @@ async def manager_action_callback(update: Update, context: ContextTypes.DEFAULT_
             )
             return
         if recurrence == "after_task":
-            parent_tasks = store.list_parent_task_options(manager_id=manager["id"])
+            parent_tasks = await db_async.db_call(
+                store.list_parent_task_options,
+                manager_id=manager["id"],
+            )
             if not parent_tasks:
                 await query.edit_message_text(
                     "No parent tasks available yet. Create a normal task first."
@@ -396,7 +381,11 @@ async def manager_action_callback(update: Update, context: ContextTypes.DEFAULT_
     if data.startswith(MANAGER_DELETE_TASK_CONFIRM_PREFIX):
         task_id = data.replace(MANAGER_DELETE_TASK_CONFIRM_PREFIX, "", 1)
         try:
-            task = store.deactivate_manager_task(task_id, manager["id"])
+            task = await db_async.db_call(
+                store.deactivate_manager_task,
+                task_id,
+                manager["id"],
+            )
         except ValueError as exc:
             await query.edit_message_text(f"Failed to delete task: {exc}")
             return
@@ -408,7 +397,7 @@ async def manager_action_callback(update: Update, context: ContextTypes.DEFAULT_
 
     if data.startswith(MANAGER_DELETE_TASK_PREFIX):
         task_id = data.replace(MANAGER_DELETE_TASK_PREFIX, "", 1)
-        task = store.get_task_by_id(task_id)
+        task = await db_async.db_call(store.get_task_by_id, task_id)
         if not task or not task.get("active", True) or task.get("manager_id") != manager["id"]:
             await query.edit_message_text("Task not found or already deleted.")
             return
@@ -434,7 +423,7 @@ async def manager_action_callback(update: Update, context: ContextTypes.DEFAULT_
 
     if data.startswith(MANAGER_FIRE_WORKER_PREFIX):
         worker_id = data.replace(MANAGER_FIRE_WORKER_PREFIX, "", 1)
-        worker = store.get_user_by_id(worker_id)
+        worker = await db_async.db_call(store.get_user_by_id, worker_id)
         if not worker or worker.get("role") != "worker":
             await query.edit_message_text("Worker not found.")
             return
@@ -452,13 +441,13 @@ async def owner_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     if not query or not query.from_user:
         return
+    await query.answer()
 
-    owner = _get_owner_user(query.from_user.id)
+    owner = await _get_owner_user(query.from_user.id)
     if not owner:
-        await query.answer("Only owners can do this.", show_alert=True)
+        await query.edit_message_text("Only owners can do this.")
         return
 
-    await query.answer()
     data = query.data
 
     if data == OWNER_LIST_TASKS:
@@ -470,7 +459,7 @@ async def owner_action_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     if data == OWNER_REPORTS:
-        await _send_report_role_choices(query, query.from_user.id)
+        await _send_report_role_choices(query, query.from_user.id, context)
         return
 
 
@@ -507,7 +496,7 @@ def _format_task_row(index: int, task: dict) -> str:
 
 
 async def _send_manager_task_list(query, manager_id: str) -> None:
-    tasks = store.list_tasks_for_manager(manager_id)
+    tasks = await db_async.db_call(store.list_tasks_for_manager, manager_id)
     if not tasks:
         await query.edit_message_text("No active tasks found under you.")
         return
@@ -529,7 +518,7 @@ async def _send_manager_task_list(query, manager_id: str) -> None:
 
 
 async def _send_owner_task_list(query, owner_id: str) -> None:
-    tasks = store.list_tasks_for_owner(owner_id)
+    tasks = await db_async.db_call(store.list_tasks_for_owner, owner_id)
     if not tasks:
         await query.edit_message_text("No active tasks found under your managers.")
         return
@@ -548,7 +537,7 @@ def _format_worker_row(index: int, worker: dict) -> str:
 
 
 async def _send_manager_worker_list(query, manager_id: str) -> None:
-    workers = store.list_workers_under_manager(manager_id)
+    workers = await db_async.db_call(store.list_workers_under_manager, manager_id)
     if not workers:
         await query.edit_message_text("No active workers are assigned under you.")
         return
@@ -561,7 +550,7 @@ async def _send_manager_worker_list(query, manager_id: str) -> None:
 
 
 async def _send_owner_worker_list(query, owner_id: str) -> None:
-    workers = store.list_workers_under_owner(owner_id)
+    workers = await db_async.db_call(store.list_workers_under_owner, owner_id)
     if not workers:
         await query.edit_message_text("No active workers are assigned under your managers.")
         return
@@ -573,34 +562,34 @@ async def _send_owner_worker_list(query, owner_id: str) -> None:
     await query.edit_message_text("Worker List\n\n" + "\n\n".join(worker_lines))
 
 
-def _report_scope_for_user(telegram_id: int) -> dict:
-    if store.telegram_has_role(telegram_id, "admin"):
+async def _report_scope_for_user(telegram_id: int) -> dict:
+    if await db_async.db_call(store.telegram_has_role, telegram_id, "admin"):
         return {
             "type": "admin",
-            "roles": store.list_roles(),
+            "roles": await db_async.db_call(store.list_roles),
             "manager_id": None,
             "owner_id": None,
-            "workers": store.list_users_by_role("worker"),
+            "workers": await db_async.db_call(store.list_users_by_role, "worker"),
         }
 
-    owner = _get_owner_user(telegram_id)
+    owner = await _get_owner_user(telegram_id)
     if owner:
         return {
             "type": "owner",
-            "roles": store.list_roles_for_owner(owner["id"]),
+            "roles": await db_async.db_call(store.list_roles_for_owner, owner["id"]),
             "manager_id": None,
             "owner_id": owner["id"],
-            "workers": store.list_workers_under_owner(owner["id"]),
+            "workers": await db_async.db_call(store.list_workers_under_owner, owner["id"]),
         }
 
-    manager = _get_manager_user(telegram_id)
+    manager = await _get_manager_user(telegram_id)
     if manager:
         return {
             "type": "manager",
-            "roles": store.list_roles_for_manager(manager["id"]),
+            "roles": await db_async.db_call(store.list_roles_for_manager, manager["id"]),
             "manager_id": manager["id"],
             "owner_id": None,
-            "workers": store.list_workers_under_manager(manager["id"]),
+            "workers": await db_async.db_call(store.list_workers_under_manager, manager["id"]),
         }
 
     return {
@@ -612,8 +601,14 @@ def _report_scope_for_user(telegram_id: int) -> dict:
     }
 
 
-async def _send_report_role_choices(target, telegram_id: int) -> None:
-    scope = _report_scope_for_user(telegram_id)
+async def _send_report_role_choices(
+    target,
+    telegram_id: int,
+    context: ContextTypes.DEFAULT_TYPE | None = None,
+) -> None:
+    scope = await _report_scope_for_user(telegram_id)
+    if context is not None:
+        context.user_data["report_scope"] = scope
     roles = scope["roles"]
     if not roles:
         text = (
@@ -671,7 +666,8 @@ async def _create_task_from_draft(
 ) -> None:
     draft = context.user_data.get("manager_task_draft", {})
     try:
-        task = store.add_task(
+        task = await db_async.db_call(
+            store.add_task,
             title=draft["title"],
             description=draft["description"],
             worker_role=draft["worker_role"],
@@ -707,7 +703,7 @@ async def manager_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     if not state:
         return
 
-    manager = _get_manager_user(update.effective_user.id)
+    manager = await _get_manager_user(update.effective_user.id)
     if not manager:
         return
 
@@ -725,7 +721,7 @@ async def manager_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         draft = context.user_data.get("manager_task_draft", {})
         draft["description"] = text
         context.user_data["manager_task_draft"] = draft
-        roles = store.list_roles_for_manager(manager["id"])
+        roles = await db_async.db_call(store.list_roles_for_manager, manager["id"])
         if not roles:
             await update.message.reply_text(
                 "No roles are under you yet. Use /manager -> Add Role first."
@@ -745,7 +741,7 @@ async def manager_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if state == "awaiting_role_name":
         try:
-            store.add_role(text, manager_id=manager["id"])
+            await db_async.db_call(store.add_role, text, manager_id=manager["id"])
         except ValueError as exc:
             await update.message.reply_text(f"Failed to add role: {exc}")
         else:
@@ -788,7 +784,7 @@ async def manager_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     worker_id = context.user_data.get("fire_worker_id")
-    worker = store.get_user_by_id(worker_id)
+    worker = await db_async.db_call(store.get_user_by_id, worker_id)
     if not worker:
         await update.message.reply_text("Worker is no longer active.")
         context.user_data.pop("manager_state", None)
@@ -797,7 +793,7 @@ async def manager_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     reason = text
     try:
-        firing = store.fire_worker(worker_id, manager["id"], reason)
+        firing = await db_async.db_call(store.fire_worker, worker_id, manager["id"], reason)
     except ValueError as exc:
         await update.message.reply_text(f"Failed to fire worker: {exc}")
     else:
@@ -820,171 +816,134 @@ async def manager_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data.pop("fire_worker_id", None)
 
 
+def _format_report_text(role: str, period: str, summary: dict[str, Any]) -> str:
+    stats = summary["stats"]
+    completion_rate = (
+        int((stats["verified"] / stats["total"]) * 100) if stats["total"] else 0
+    )
+    report_workers = summary["workers"]
+    total_worker_points = sum(worker.get("points", 0) for worker in report_workers)
+    point_lines = [
+        f"{worker['name']} ({worker['worker_role']}): {worker.get('points', 0)}"
+        for worker in report_workers
+    ]
+
+    max_tasks_to_show = 12
+    task_metrics = summary["task_metrics"]
+    task_lines: list[str] = []
+    for index, metric in enumerate(task_metrics[:max_tasks_to_show], start=1):
+        task_lines.append(
+            f"{index}) {metric['title']}\n"
+            f"   Total: {metric['total']} | Verified: {metric['verified']} | "
+            f"NO: {metric['not_done']} | Rejected: {metric['rejected']} | "
+            f"Pending manager: {metric['pending_manager']}"
+        )
+    if summary["total_task_groups"] > max_tasks_to_show:
+        task_lines.append(
+            f"...and {summary['total_task_groups'] - max_tasks_to_show} more tasks."
+        )
+
+    role_label = "All" if role == "all" else role
+    report_text = (
+        f"Role: {role_label}\n"
+        f"Period: {period.title()}\n\n"
+        f"Total assigned: {stats['total']}\n"
+        f"Completed (verified): {stats['verified']}\n"
+        f"Not completed: {stats['not_completed']}\n"
+        f"Rejected by manager: {stats['rejected']}\n"
+        f"Extended: {stats['extended']}\n"
+        f"Completion rate: {completion_rate}%\n\n"
+        f"Total worker points: {total_worker_points}\n"
+        "Worker points:\n"
+        + ("\n".join(point_lines) if point_lines else "No active workers found.")
+        + "\n\n"
+        f"Responses -> YES: {summary['yes_count']}, NO: {summary['no_count']}, "
+        f"EXTEND: {summary['extend_count']}, "
+        f"No response: {summary['pending_response_count']}\n"
+        f"Manager verification pending: {summary['pending_manager_count']}\n\n"
+        "Task-wise metrics:\n"
+        + ("\n".join(task_lines) if task_lines else "No task runs in this period.")
+    )
+    if len(report_text) > 4000:
+        report_text = report_text[:3990] + "\n...(truncated)"
+    return report_text
+
+
 async def report_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_user or not update.message:
         return
-    if not _can_view_reports(update.effective_user.id):
+    if not await _can_view_reports(update.effective_user.id):
         await update.message.reply_text("Only managers, owners, or admin can view reports.")
         return
 
-    await _send_report_role_choices(update.message, update.effective_user.id)
+    await _send_report_role_choices(update.message, update.effective_user.id, context)
 
 
 async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query or not query.from_user:
         return
-    if not _can_view_reports(query.from_user.id):
-        await query.answer("Not allowed.", show_alert=True)
-        return
     await query.answer()
 
-    data = query.data
-    if data.startswith(REPORT_ROLE_PREFIX):
-        role = data.replace(REPORT_ROLE_PREFIX, "", 1)
-        scope = _report_scope_for_user(query.from_user.id)
-        if role != "all" and role not in scope["roles"]:
-            await query.edit_message_text("This role is not available in your report scope.")
-            return
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "Today",
-                    callback_data=f"{REPORT_PERIOD_PREFIX}today|{role}",
-                ),
-                InlineKeyboardButton(
-                    "This Week",
-                    callback_data=f"{REPORT_PERIOD_PREFIX}week|{role}",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "This Month",
-                    callback_data=f"{REPORT_PERIOD_PREFIX}month|{role}",
-                ),
-                InlineKeyboardButton(
-                    "All Time",
-                    callback_data=f"{REPORT_PERIOD_PREFIX}all|{role}",
-                ),
-            ],
-        ]
-        await query.edit_message_text(
-            f"Selected role: {role}. Select period:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        return
-
-    if data.startswith(REPORT_PERIOD_PREFIX):
-        payload = data.replace(REPORT_PERIOD_PREFIX, "", 1)
-        period, role = payload.split("|", maxsplit=1)
-        worker_role = None if role == "all" else role
-        scope = _report_scope_for_user(query.from_user.id)
-        if worker_role and worker_role not in scope["roles"]:
-            await query.edit_message_text("This role is not available in your report scope.")
+    with OperationTimer("manager.report_callback", user_id=query.from_user.id):
+        if not await _can_view_reports(query.from_user.id):
+            await query.edit_message_text("Not allowed.")
             return
 
-        runs = store.get_runs_for_report(
-            worker_role=worker_role,
-            period=period,
-            manager_id=scope["manager_id"],
-            owner_id=scope["owner_id"],
-        )
-        stats = store.summarize_runs(runs)
-        completion_rate = (
-            int((stats["verified"] / stats["total"]) * 100) if stats["total"] else 0
-        )
-        if worker_role:
-            report_workers = [
-                worker
-                for worker in [store.get_user_by_role(worker_role)]
-                if worker is not None
+        data = query.data
+        if data.startswith(REPORT_ROLE_PREFIX):
+            role = data.replace(REPORT_ROLE_PREFIX, "", 1)
+            scope = await _report_scope_for_user(query.from_user.id)
+            context.user_data["report_scope"] = scope
+            if role != "all" and role not in scope["roles"]:
+                await query.edit_message_text("This role is not available in your report scope.")
+                return
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "Today",
+                        callback_data=f"{REPORT_PERIOD_PREFIX}today|{role}",
+                    ),
+                    InlineKeyboardButton(
+                        "This Week",
+                        callback_data=f"{REPORT_PERIOD_PREFIX}week|{role}",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "This Month",
+                        callback_data=f"{REPORT_PERIOD_PREFIX}month|{role}",
+                    ),
+                    InlineKeyboardButton(
+                        "All Time",
+                        callback_data=f"{REPORT_PERIOD_PREFIX}all|{role}",
+                    ),
+                ],
             ]
-        else:
-            report_workers = scope["workers"]
-        total_worker_points = sum(worker.get("points", 0) for worker in report_workers)
-        point_lines = [
-            f"{worker['name']} ({worker['worker_role']}): {worker.get('points', 0)}"
-            for worker in report_workers
-        ]
-        yes_count = sum(1 for run in runs if run.get("worker_response") == "yes")
-        no_count = sum(1 for run in runs if run.get("worker_response") == "no")
-        extend_count = sum(1 for run in runs if run.get("worker_response") == "extend")
-        pending_response_count = sum(
-            1 for run in runs if run.get("worker_response") is None
-        )
-        pending_manager_count = sum(
-            1
-            for run in runs
-            if run.get("worker_response") in {"yes", "no"}
-            and run.get("manager_status") == "pending"
-        )
-
-        task_metrics: dict[str, dict[str, int | str]] = {}
-        for run in runs:
-            task_id = run.get("task_id")
-            if not task_id:
-                continue
-            task = store.get_task_by_id(task_id)
-            task_title = task["title"] if task else f"Unknown Task ({task_id})"
-            if task_id not in task_metrics:
-                task_metrics[task_id] = {
-                    "title": task_title,
-                    "total": 0,
-                    "verified": 0,
-                    "not_done": 0,
-                    "rejected": 0,
-                    "pending_manager": 0,
-                }
-
-            metric = task_metrics[task_id]
-            metric["total"] += 1
-            if run.get("status") == "manager_verified":
-                metric["verified"] += 1
-            if run.get("worker_response") == "no":
-                metric["not_done"] += 1
-            if run.get("status") == "manager_rejected":
-                metric["rejected"] += 1
-            if (
-                run.get("worker_response") in {"yes", "no"}
-                and run.get("manager_status") == "pending"
-            ):
-                metric["pending_manager"] += 1
-
-        sorted_task_metrics = sorted(
-            task_metrics.values(), key=lambda item: int(item["total"]), reverse=True
-        )
-        task_lines: list[str] = []
-        max_tasks_to_show = 12
-        for index, metric in enumerate(sorted_task_metrics[:max_tasks_to_show], start=1):
-            task_lines.append(
-                f"{index}) {metric['title']}\n"
-                f"   Total: {metric['total']} | Verified: {metric['verified']} | "
-                f"NO: {metric['not_done']} | Rejected: {metric['rejected']} | "
-                f"Pending manager: {metric['pending_manager']}"
+            await query.edit_message_text(
+                f"Selected role: {role}. Select period:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
             )
-        if len(sorted_task_metrics) > max_tasks_to_show:
-            task_lines.append(
-                f"...and {len(sorted_task_metrics) - max_tasks_to_show} more tasks."
-            )
+            return
 
-        role_label = "All" if role == "all" else role
-        report_text = (
-            f"Role: {role_label}\n"
-            f"Period: {period.title()}\n\n"
-            f"Total assigned: {stats['total']}\n"
-            f"Completed (verified): {stats['verified']}\n"
-            f"Not completed: {stats['not_completed']}\n"
-            f"Rejected by manager: {stats['rejected']}\n"
-            f"Extended: {stats['extended']}\n"
-            f"Completion rate: {completion_rate}%\n\n"
-            f"Total worker points: {total_worker_points}\n"
-            "Worker points:\n"
-            + ("\n".join(point_lines) if point_lines else "No active workers found.")
-            + "\n\n"
-            f"Responses -> YES: {yes_count}, NO: {no_count}, EXTEND: {extend_count}, "
-            f"No response: {pending_response_count}\n"
-            f"Manager verification pending: {pending_manager_count}\n\n"
-            "Task-wise metrics:\n"
-            + ("\n".join(task_lines) if task_lines else "No task runs in this period.")
-        )
-        await query.edit_message_text(report_text)
+        if data.startswith(REPORT_PERIOD_PREFIX):
+            payload = data.replace(REPORT_PERIOD_PREFIX, "", 1)
+            period, role = payload.split("|", maxsplit=1)
+            worker_role = None if role == "all" else role
+            scope = context.user_data.get("report_scope")
+            if not scope:
+                scope = await _report_scope_for_user(query.from_user.id)
+            if worker_role and worker_role not in scope["roles"]:
+                await query.edit_message_text("This role is not available in your report scope.")
+                return
+
+            summary = await db_async.db_call(
+                store.get_report_summary,
+                worker_role=worker_role,
+                period=period,
+                manager_id=scope["manager_id"],
+                owner_id=scope["owner_id"],
+            )
+            report_text = _format_report_text(role, period, summary)
+            await query.edit_message_text(report_text)
+            return

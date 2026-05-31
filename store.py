@@ -1,12 +1,20 @@
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Iterator
 import unicodedata
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 
-from config import ADMIN_TELEGRAM_ID, DATABASE_URL
+from config import (
+    ADMIN_TELEGRAM_ID,
+    DATABASE_URL,
+    DB_POOL_MAX_SIZE,
+    DB_POOL_MIN_SIZE,
+    DB_POOL_TIMEOUT,
+)
 
 DEFAULT_ROLES = ["Driver", "Cook", "Cleaner", "Security"]
 
@@ -43,17 +51,46 @@ def _admin_user() -> dict[str, Any]:
     }
 
 
-def _connect():
-    if not DATABASE_URL:
-        raise RuntimeError(
-            "DATABASE_URL is required. Set it to your Supabase Postgres connection string."
+_pool: ConnectionPool | None = None
+
+
+def _pool_kwargs() -> dict[str, Any]:
+    return {
+        "row_factory": dict_row,
+        "sslmode": "require",
+        "prepare_threshold": None,
+    }
+
+
+def _get_pool() -> ConnectionPool:
+    global _pool
+    if _pool is None:
+        if not DATABASE_URL:
+            raise RuntimeError(
+                "DATABASE_URL is required. Set it to your Supabase Postgres connection string."
+            )
+        _pool = ConnectionPool(
+            conninfo=DATABASE_URL,
+            min_size=DB_POOL_MIN_SIZE,
+            max_size=DB_POOL_MAX_SIZE,
+            timeout=DB_POOL_TIMEOUT,
+            kwargs=_pool_kwargs(),
+            open=True,
         )
-    return psycopg.connect(
-        DATABASE_URL,
-        row_factory=dict_row,
-        sslmode="require",
-        prepare_threshold=None,
-    )
+    return _pool
+
+
+@contextmanager
+def _connect() -> Iterator[Any]:
+    with _get_pool().connection() as conn:
+        yield conn
+
+
+def close_pool() -> None:
+    global _pool
+    if _pool is not None:
+        _pool.close()
+        _pool = None
 
 
 def _run_schema(conn) -> None:
@@ -156,6 +193,21 @@ def _run_schema(conn) -> None:
             where active = true;
         create index if not exists tasks_active_manager_idx on tasks(manager_id, active);
         create index if not exists task_runs_report_idx on task_runs(worker_role, created_at);
+        create index if not exists users_active_telegram_idx
+            on users(telegram_id)
+            where active = true;
+        create index if not exists users_active_telegram_role_idx
+            on users(telegram_id, role)
+            where active = true;
+        create index if not exists tasks_dependent_parent_idx
+            on tasks(depends_on_task_id)
+            where active = true and recurrence = 'after_task';
+        create index if not exists task_runs_manager_created_idx
+            on task_runs(manager_id, created_at);
+        create index if not exists task_runs_task_created_idx
+            on task_runs(task_id, created_at);
+        create index if not exists task_runs_manager_role_created_idx
+            on task_runs(manager_id, worker_role, created_at);
 
         alter table app_settings enable row level security;
         alter table users enable row level security;
@@ -282,6 +334,26 @@ def telegram_has_role(telegram_id: int, role: str) -> bool:
             limit 1
             """,
             (telegram_id, role),
+        ).fetchone()
+    return row is not None
+
+
+def telegram_has_any_role(telegram_id: int, roles: list[str]) -> bool:
+    if "admin" in roles and _is_env_admin(telegram_id):
+        return True
+    db_roles = [role for role in roles if role != "admin"]
+    if not db_roles:
+        return False
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            select 1 from users
+            where telegram_id = %s
+              and role = any(%s)
+              and active = true
+            limit 1
+            """,
+            (telegram_id, db_roles),
         ).fetchone()
     return row is not None
 
@@ -1294,6 +1366,480 @@ def summarize_runs(runs: list[dict[str, Any]]) -> dict[str, int]:
         "not_completed": sum(1 for run in runs if run.get("status") == "worker_not_done"),
         "rejected": sum(1 for run in runs if run.get("status") == "manager_rejected"),
         "extended": sum(1 for run in runs if run.get("status") == "extended"),
+    }
+
+
+def _report_from_time(period: str) -> datetime | None:
+    now = datetime.utcnow()
+    if period == "today":
+        return now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if period == "week":
+        return now - timedelta(days=7)
+    if period == "month":
+        return now - timedelta(days=30)
+    return None
+
+
+def _report_filter_clause(
+    worker_role: str | None,
+    period: str,
+    manager_id: str | None,
+    owner_id: str | None,
+) -> tuple[str, list[Any]]:
+    query = " where true"
+    params: list[Any] = []
+    if worker_role:
+        query += " and tr.worker_role = %s"
+        params.append(worker_role)
+    if manager_id:
+        query += " and tr.manager_id = %s"
+        params.append(manager_id)
+    if owner_id:
+        query += (
+            " and tr.manager_id in ("
+            "select id from users "
+            "where role = 'manager' and active = true and owner_id = %s"
+            ")"
+        )
+        params.append(owner_id)
+    from_time = _report_from_time(period)
+    if from_time:
+        query += " and tr.created_at >= %s"
+        params.append(from_time.replace(microsecond=0).isoformat())
+    return query, params
+
+
+def get_report_summary(
+    worker_role: str | None = None,
+    period: str = "today",
+    manager_id: str | None = None,
+    owner_id: str | None = None,
+    top_tasks: int = 12,
+) -> dict[str, Any]:
+    filter_clause, params = _report_filter_clause(
+        worker_role, period, manager_id, owner_id
+    )
+    with _connect() as conn:
+        stats_row = conn.execute(
+            f"""
+            select
+                count(*) as total,
+                count(*) filter (where tr.status = 'manager_verified') as verified,
+                count(*) filter (where tr.status = 'worker_not_done') as not_completed,
+                count(*) filter (where tr.status = 'manager_rejected') as rejected,
+                count(*) filter (where tr.status = 'extended') as extended,
+                count(*) filter (where tr.worker_response = 'yes') as yes_count,
+                count(*) filter (where tr.worker_response = 'no') as no_count,
+                count(*) filter (where tr.worker_response = 'extend') as extend_count,
+                count(*) filter (where tr.worker_response is null) as pending_response_count,
+                count(*) filter (
+                    where tr.worker_response in ('yes', 'no')
+                      and tr.manager_status = 'pending'
+                ) as pending_manager_count
+            from task_runs tr
+            {filter_clause}
+            """,
+            params,
+        ).fetchone()
+
+        task_metrics = conn.execute(
+            f"""
+            select
+                tr.task_id,
+                coalesce(t.title, 'Unknown Task') as title,
+                count(*) as total,
+                count(*) filter (where tr.status = 'manager_verified') as verified,
+                count(*) filter (where tr.worker_response = 'no') as not_done,
+                count(*) filter (where tr.status = 'manager_rejected') as rejected,
+                count(*) filter (
+                    where tr.worker_response in ('yes', 'no')
+                      and tr.manager_status = 'pending'
+                ) as pending_manager
+            from task_runs tr
+            left join tasks t on t.id = tr.task_id
+            {filter_clause}
+            group by tr.task_id, t.title
+            order by count(*) desc
+            limit %s
+            """,
+            [*params, top_tasks + 1],
+        ).fetchall()
+
+        total_task_groups = conn.execute(
+            f"""
+            select count(*) as group_count
+            from (
+                select tr.task_id
+                from task_runs tr
+                {filter_clause}
+                group by tr.task_id
+            ) grouped_tasks
+            """,
+            params,
+        ).fetchone()
+
+        if worker_role:
+            workers = conn.execute(
+                """
+                select name, worker_role, points
+                from users
+                where role = 'worker' and active = true and worker_role = %s
+                order by name
+                """,
+                (worker_role,),
+            ).fetchall()
+        elif manager_id:
+            workers = conn.execute(
+                """
+                select distinct u.name, u.worker_role, u.points
+                from users u
+                where u.role = 'worker'
+                  and u.active = true
+                  and u.worker_role in (
+                    select name from roles where manager_id = %s
+                    union
+                    select worker_role from tasks where manager_id = %s and active = true
+                  )
+                order by u.worker_role, u.name
+                """,
+                (manager_id, manager_id),
+            ).fetchall()
+        elif owner_id:
+            workers = conn.execute(
+                """
+                select distinct u.name, u.worker_role, u.points
+                from users u
+                where u.role = 'worker'
+                  and u.active = true
+                  and u.worker_role in (
+                    select r.name
+                    from roles r
+                    join users m on m.id = r.manager_id
+                    where m.role = 'manager' and m.active = true and m.owner_id = %s
+                    union
+                    select t.worker_role
+                    from tasks t
+                    join users m on m.id = t.manager_id
+                    where t.active = true
+                      and m.role = 'manager'
+                      and m.active = true
+                      and m.owner_id = %s
+                  )
+                order by u.worker_role, u.name
+                """,
+                (owner_id, owner_id),
+            ).fetchall()
+        else:
+            workers = conn.execute(
+                """
+                select name, worker_role, points
+                from users
+                where role = 'worker' and active = true
+                order by worker_role, name
+                """
+            ).fetchall()
+
+    stats = {
+        "total": int(stats_row["total"] or 0),
+        "verified": int(stats_row["verified"] or 0),
+        "not_completed": int(stats_row["not_completed"] or 0),
+        "rejected": int(stats_row["rejected"] or 0),
+        "extended": int(stats_row["extended"] or 0),
+    }
+    return {
+        "stats": stats,
+        "yes_count": int(stats_row["yes_count"] or 0),
+        "no_count": int(stats_row["no_count"] or 0),
+        "extend_count": int(stats_row["extend_count"] or 0),
+        "pending_response_count": int(stats_row["pending_response_count"] or 0),
+        "pending_manager_count": int(stats_row["pending_manager_count"] or 0),
+        "task_metrics": task_metrics[:top_tasks],
+        "total_task_groups": int(total_task_groups["group_count"] or 0),
+        "workers": workers,
+    }
+
+
+def get_verification_context(run_id: str) -> dict[str, Any] | None:
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            select
+                tr.*,
+                t.title as task_title,
+                t.description as task_description,
+                m.id as manager_user_id,
+                m.telegram_id as manager_telegram_id,
+                m.name as manager_name,
+                w.id as worker_user_id,
+                w.name as worker_name,
+                w.telegram_id as worker_telegram_id
+            from task_runs tr
+            join tasks t on t.id = tr.task_id
+            join users m on m.id = tr.manager_id and m.active = true
+            left join users w
+              on w.role = 'worker'
+             and w.worker_role = tr.worker_role
+             and w.active = true
+            where tr.id = %s
+            """,
+            (run_id,),
+        ).fetchone()
+    return row
+
+
+def verify_task_run(run_id: str) -> dict[str, Any]:
+    verified_at = _now_iso()
+    with _connect() as conn:
+        run = conn.execute(
+            "select * from task_runs where id = %s",
+            (run_id,),
+        ).fetchone()
+        if not run:
+            raise ValueError("Task run not found.")
+
+        was_already_finalized = run.get("status") in {
+            "manager_verified",
+            "manager_rejected",
+        }
+        run = conn.execute(
+            """
+            update task_runs
+            set status = 'manager_verified',
+                manager_status = 'verified',
+                verified_at = %s
+            where id = %s
+            returning *
+            """,
+            (verified_at, run_id),
+        ).fetchone()
+
+        worker = conn.execute(
+            """
+            select * from users
+            where role = 'worker' and worker_role = %s and active = true
+            limit 1
+            """,
+            (run["worker_role"],),
+        ).fetchone()
+
+        updated_worker = worker
+        if worker and not was_already_finalized:
+            updated_worker = conn.execute(
+                """
+                update users
+                set points = points + 1
+                where id = %s and role = 'worker' and active = true
+                returning *
+                """,
+                (worker["id"],),
+            ).fetchone()
+
+        task = conn.execute(
+            "select * from tasks where id = %s",
+            (run["task_id"],),
+        ).fetchone()
+
+        dependent_tasks: list[dict[str, Any]] = []
+        if not was_already_finalized:
+            dependent_tasks = conn.execute(
+                """
+                select *
+                from tasks
+                where active = true
+                  and recurrence = 'after_task'
+                  and depends_on_task_id = %s
+                order by created_at
+                """,
+                (run["task_id"],),
+            ).fetchall()
+
+    return {
+        "run": run,
+        "task": task,
+        "worker": worker,
+        "updated_worker": updated_worker,
+        "dependent_tasks": dependent_tasks,
+        "was_already_finalized": was_already_finalized,
+    }
+
+
+def reject_task_run(run_id: str) -> dict[str, Any]:
+    verified_at = _now_iso()
+    with _connect() as conn:
+        run = conn.execute(
+            "select * from task_runs where id = %s",
+            (run_id,),
+        ).fetchone()
+        if not run:
+            raise ValueError("Task run not found.")
+
+        was_already_finalized = run.get("status") in {
+            "manager_verified",
+            "manager_rejected",
+        }
+        run = conn.execute(
+            """
+            update task_runs
+            set status = 'manager_rejected',
+                manager_status = 'rejected',
+                verified_at = %s
+            where id = %s
+            returning *
+            """,
+            (verified_at, run_id),
+        ).fetchone()
+
+        worker = conn.execute(
+            """
+            select * from users
+            where role = 'worker' and worker_role = %s and active = true
+            limit 1
+            """,
+            (run["worker_role"],),
+        ).fetchone()
+
+        updated_worker = worker
+        if worker and not was_already_finalized:
+            updated_worker = conn.execute(
+                """
+                update users
+                set points = points - 2
+                where id = %s and role = 'worker' and active = true
+                returning *
+                """,
+                (worker["id"],),
+            ).fetchone()
+
+        task = conn.execute(
+            "select * from tasks where id = %s",
+            (run["task_id"],),
+        ).fetchone()
+
+    return {
+        "run": run,
+        "task": task,
+        "worker": worker,
+        "updated_worker": updated_worker,
+        "was_already_finalized": was_already_finalized,
+    }
+
+
+def create_task_run_with_delivery_context(
+    task: dict[str, Any],
+    scheduled_for: str | None = None,
+) -> dict[str, Any] | None:
+    if not task or not task.get("active", True):
+        return None
+
+    scheduled_value = scheduled_for or _now_iso()
+    with _connect() as conn:
+        settings_row = conn.execute(
+            "select test_mode, test_telegram_id from app_settings where id = true"
+        ).fetchone()
+        settings = {
+            "test_mode": bool(settings_row["test_mode"]) if settings_row else False,
+            "test_telegram_id": settings_row["test_telegram_id"] if settings_row else None,
+        }
+
+        active_task = conn.execute(
+            "select * from tasks where id = %s and active = true",
+            (task["id"],),
+        ).fetchone()
+        if not active_task:
+            return None
+
+        worker = conn.execute(
+            """
+            select * from users
+            where role = 'worker' and worker_role = %s and active = true
+            limit 1
+            """,
+            (active_task["worker_role"],),
+        ).fetchone()
+
+        if not worker and not settings.get("test_mode"):
+            return None
+
+        run = conn.execute(
+            """
+            insert into task_runs (
+                id, task_id, worker_role, manager_id, scheduled_for, status,
+                worker_response, reason, worker_note, manager_status,
+                created_at, completed_at, verified_at
+            )
+            values (%s, %s, %s, %s, %s, 'sent_to_worker', null, null, null, 'pending', %s, null, null)
+            returning *
+            """,
+            (
+                _new_id("r"),
+                active_task["id"],
+                active_task["worker_role"],
+                active_task["manager_id"],
+                scheduled_value,
+                _now_iso(),
+            ),
+        ).fetchone()
+
+        chat_id = (
+            settings.get("test_telegram_id")
+            if settings.get("test_mode")
+            else worker["telegram_id"] if worker else None
+        )
+
+    return {
+        "run": run,
+        "task": active_task,
+        "worker": worker,
+        "chat_id": chat_id,
+        "settings": settings,
+    }
+
+
+def get_run_delivery_context(run_id: str) -> dict[str, Any] | None:
+    with _connect() as conn:
+        settings_row = conn.execute(
+            "select test_mode, test_telegram_id from app_settings where id = true"
+        ).fetchone()
+        settings = {
+            "test_mode": bool(settings_row["test_mode"]) if settings_row else False,
+            "test_telegram_id": settings_row["test_telegram_id"] if settings_row else None,
+        }
+
+        row = conn.execute(
+            """
+            select
+                tr.*,
+                t.title as task_title,
+                t.description as task_description,
+                w.telegram_id as worker_telegram_id
+            from task_runs tr
+            join tasks t on t.id = tr.task_id
+            left join users w
+              on w.role = 'worker'
+             and w.worker_role = tr.worker_role
+             and w.active = true
+            where tr.id = %s
+            """,
+            (run_id,),
+        ).fetchone()
+        if not row:
+            return None
+
+        if not row.get("worker_telegram_id") and not settings.get("test_mode"):
+            return None
+
+        chat_id = (
+            settings.get("test_telegram_id")
+            if settings.get("test_mode")
+            else row.get("worker_telegram_id")
+        )
+
+    return {
+        "run": row,
+        "task_title": row["task_title"],
+        "task_description": row["task_description"],
+        "chat_id": chat_id,
+        "settings": settings,
     }
 
 

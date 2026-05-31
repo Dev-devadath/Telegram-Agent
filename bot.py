@@ -14,6 +14,7 @@ from telegram.ext import (
 )
 
 from config import BOT_TOKEN
+from db_async import shutdown_executor
 from handlers.admin import admin_callback, admin_panel, admin_text_handler
 from handlers.demo import demo_callback, demo_handler, demo_reason_handler
 from handlers.manager import (
@@ -37,7 +38,7 @@ from handlers.worker import (
     task_response_callback,
 )
 from scheduler import register_all_jobs
-from store import ensure_data_file
+from store import close_pool, ensure_data_file
 
 
 logging.basicConfig(
@@ -85,13 +86,25 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.exception("Unhandled exception: %s", context.error)
 
 
+async def post_shutdown(_application: Application) -> None:
+    close_pool()
+    shutdown_executor()
+    logger.info("Database pool and executor shut down")
+
+
 def main() -> None:
     if not BOT_TOKEN or BOT_TOKEN == "replace_with_bot_token":
         raise RuntimeError("Set BOT_TOKEN in .env before running the bot.")
 
     ensure_data_file()
     start_health_server()
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .concurrent_updates(True)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("demo", demo_handler))
