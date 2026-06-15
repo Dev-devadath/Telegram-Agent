@@ -24,6 +24,12 @@ ADMIN_EDIT_OWNER_TGID_PREFIX = f"{ADMIN_PREFIX}edit_owner_tgid:"
 ADMIN_REMOVE_OWNER_PREFIX = f"{ADMIN_PREFIX}remove_owner:"
 ADMIN_REMOVE_OWNER_CONFIRM_PREFIX = f"{ADMIN_PREFIX}remove_owner_confirm:"
 ADMIN_ADD_TASK = f"{ADMIN_PREFIX}add_task"
+ADMIN_LIST_TASKS = f"{ADMIN_PREFIX}list_tasks"
+ADMIN_EDIT_TASK_MENU_PREFIX = f"{ADMIN_PREFIX}edit_task_menu:"
+ADMIN_EDIT_TASK_TITLE_PREFIX = f"{ADMIN_PREFIX}edit_task_title:"
+ADMIN_EDIT_TASK_DESCRIPTION_PREFIX = f"{ADMIN_PREFIX}edit_task_description:"
+ADMIN_EDIT_TASK_TIME_PREFIX = f"{ADMIN_PREFIX}edit_task_time:"
+ADMIN_TOGGLE_TASK_PENALTY_PREFIX = f"{ADMIN_PREFIX}toggle_task_penalty:"
 ADMIN_REPORT = f"{ADMIN_PREFIX}report"
 ADMIN_TESTMODE = f"{ADMIN_PREFIX}testmode"
 ADMIN_RESET = f"{ADMIN_PREFIX}reset"
@@ -39,6 +45,7 @@ ADMIN_TASK_MANAGER_PREFIX = f"{ADMIN_PREFIX}task_manager:"
 ADMIN_TASK_RECURRENCE_PREFIX = f"{ADMIN_PREFIX}task_recurrence:"
 ADMIN_TASK_WEEKDAY_PREFIX = f"{ADMIN_PREFIX}task_weekday:"
 ADMIN_TASK_PARENT_PREFIX = f"{ADMIN_PREFIX}task_parent:"
+ADMIN_TASK_PENALTY_PREFIX = f"{ADMIN_PREFIX}task_penalty:"
 
 WEEKDAYS = [
     ("Monday", 0),
@@ -65,6 +72,7 @@ def _panel_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("List / Edit Managers", callback_data=ADMIN_LIST_MANAGERS)],
         [InlineKeyboardButton("Remove Manager", callback_data=ADMIN_REMOVE_MANAGER)],
         [InlineKeyboardButton("Add Task", callback_data=ADMIN_ADD_TASK)],
+        [InlineKeyboardButton("List / Edit Tasks", callback_data=ADMIN_LIST_TASKS)],
         [InlineKeyboardButton("Reports", callback_data=ADMIN_REPORT)],
         [InlineKeyboardButton("Toggle Test Mode", callback_data=ADMIN_TESTMODE)],
         [InlineKeyboardButton("Reset Workers & Managers", callback_data=ADMIN_RESET)],
@@ -80,6 +88,25 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     await update.message.reply_text("Admin panel:", reply_markup=_panel_markup())
+
+
+def _format_admin_task_row(index: int, task: dict) -> str:
+    recurrence = task.get("recurrence", "daily")
+    if recurrence == "after_task":
+        time_text = "After parent verification"
+    else:
+        time_text = task["time"]
+    penalty_text = "No deduction on rejection" if task.get("no_penalty") else "Normal points"
+    return (
+        f"{index}. {task['title']}\n"
+        f"   Description: {task.get('description') or 'No description'}\n"
+        f"   Manager: {task.get('manager_name', 'Unknown')}\n"
+        f"   Worker Role: {task['worker_role']}\n"
+        f"   Worker: {task.get('worker_name', 'Unassigned')}\n"
+        f"   Time: {time_text}\n"
+        f"   Repeat: {recurrence}\n"
+        f"   Points: {penalty_text}"
+    )
 
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -494,6 +521,136 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
+    if data == ADMIN_LIST_TASKS:
+        tasks = store.list_tasks_for_admin()
+        if not tasks:
+            await query.edit_message_text("No active tasks available.")
+            return
+        task_lines = [
+            _format_admin_task_row(index, task)
+            for index, task in enumerate(tasks, start=1)
+        ]
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    f"Edit {index}. {task['title'][:25]}",
+                    callback_data=f"{ADMIN_EDIT_TASK_MENU_PREFIX}{task['id']}",
+                )
+            ]
+            for index, task in enumerate(tasks, start=1)
+        ]
+        await query.edit_message_text(
+            "Active tasks:\n\n"
+            + "\n\n".join(task_lines)
+            + "\n\nSelect a task below to edit:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data.startswith(ADMIN_EDIT_TASK_MENU_PREFIX):
+        task_id = data.replace(ADMIN_EDIT_TASK_MENU_PREFIX, "", 1)
+        task = store.get_task_by_id(task_id)
+        if not task or not task.get("active", True):
+            await query.edit_message_text("Task not found.")
+            return
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "Edit title",
+                    callback_data=f"{ADMIN_EDIT_TASK_TITLE_PREFIX}{task_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "Edit description",
+                    callback_data=f"{ADMIN_EDIT_TASK_DESCRIPTION_PREFIX}{task_id}",
+                )
+            ],
+        ]
+        if task.get("recurrence") != "after_task":
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        "Edit time",
+                        callback_data=f"{ADMIN_EDIT_TASK_TIME_PREFIX}{task_id}",
+                    )
+                ]
+            )
+        keyboard.extend(
+            [
+                [
+                    InlineKeyboardButton(
+                        "Toggle no-deduction",
+                        callback_data=f"{ADMIN_TOGGLE_TASK_PENALTY_PREFIX}{task_id}",
+                    )
+                ],
+                [InlineKeyboardButton("Back to tasks", callback_data=ADMIN_LIST_TASKS)],
+            ]
+        )
+        penalty_text = (
+            "No deduction on rejection" if task.get("no_penalty") else "Normal points"
+        )
+        await query.edit_message_text(
+            f"Edit task: {task['title']}\n"
+            f"Description: {task.get('description') or 'No description'}\n"
+            f"Time: {task['time']}\n"
+            f"Repeat: {task.get('recurrence', 'daily')}\n"
+            f"Points: {penalty_text}",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data.startswith(ADMIN_EDIT_TASK_TITLE_PREFIX):
+        task_id = data.replace(ADMIN_EDIT_TASK_TITLE_PREFIX, "", 1)
+        task = store.get_task_by_id(task_id)
+        if not task or not task.get("active", True):
+            await query.edit_message_text("Task not found.")
+            return
+        context.user_data["admin_state"] = "awaiting_edit_task_title"
+        context.user_data["edit_task_id"] = task_id
+        await query.edit_message_text(f"Send new title for task {task['title']}.")
+        return
+
+    if data.startswith(ADMIN_EDIT_TASK_DESCRIPTION_PREFIX):
+        task_id = data.replace(ADMIN_EDIT_TASK_DESCRIPTION_PREFIX, "", 1)
+        task = store.get_task_by_id(task_id)
+        if not task or not task.get("active", True):
+            await query.edit_message_text("Task not found.")
+            return
+        context.user_data["admin_state"] = "awaiting_edit_task_description"
+        context.user_data["edit_task_id"] = task_id
+        await query.edit_message_text(f"Send new description for task {task['title']}.")
+        return
+
+    if data.startswith(ADMIN_EDIT_TASK_TIME_PREFIX):
+        task_id = data.replace(ADMIN_EDIT_TASK_TIME_PREFIX, "", 1)
+        task = store.get_task_by_id(task_id)
+        if not task or not task.get("active", True):
+            await query.edit_message_text("Task not found.")
+            return
+        context.user_data["admin_state"] = "awaiting_edit_task_time"
+        context.user_data["edit_task_id"] = task_id
+        await query.edit_message_text("Send new task time in 24h format HH:MM.")
+        return
+
+    if data.startswith(ADMIN_TOGGLE_TASK_PENALTY_PREFIX):
+        task_id = data.replace(ADMIN_TOGGLE_TASK_PENALTY_PREFIX, "", 1)
+        task = store.get_task_by_id(task_id)
+        if not task or not task.get("active", True):
+            await query.edit_message_text("Task not found.")
+            return
+        updated = store.update_task(task_id, {"no_penalty": not task.get("no_penalty")})
+        penalty_text = (
+            "No deduction on rejection" if updated.get("no_penalty") else "Normal points"
+        )
+        await query.edit_message_text(
+            f"Task point behavior updated: {updated['title']}\nPoints: {penalty_text}",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Back to tasks", callback_data=ADMIN_LIST_TASKS)]]
+            ),
+        )
+        return
+
     if data == ADMIN_ADD_TASK:
         managers = store.list_users_by_role("manager")
         roles = store.list_roles()
@@ -506,6 +663,27 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.user_data["admin_state"] = "awaiting_task_title"
         context.user_data["task_draft"] = {}
         await query.edit_message_text("Send task title.")
+        return
+
+    if data.startswith(ADMIN_TASK_PENALTY_PREFIX):
+        value = data.replace(ADMIN_TASK_PENALTY_PREFIX, "", 1)
+        draft = context.user_data.get("task_draft", {})
+        draft["no_penalty"] = value == "no_penalty"
+        context.user_data["task_draft"] = draft
+        roles = store.list_roles()
+        if not roles:
+            await query.edit_message_text("Add at least one role before creating tasks.")
+            context.user_data.pop("admin_state", None)
+            context.user_data.pop("task_draft", None)
+            return
+        keyboard = [
+            [InlineKeyboardButton(role, callback_data=f"{ADMIN_TASK_ROLE_PREFIX}{role}")]
+            for role in roles
+        ]
+        await query.edit_message_text(
+            "Select role for this task:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
         return
 
     if data.startswith(ADMIN_TASK_ROLE_PREFIX):
@@ -709,6 +887,7 @@ async def _create_task_from_draft(target, context: ContextTypes.DEFAULT_TYPE) ->
             weekday=draft.get("weekday"),
             scheduled_date=draft.get("scheduled_date"),
             depends_on_task_id=draft.get("depends_on_task_id"),
+            no_penalty=draft.get("no_penalty", False),
         )
         scheduler.schedule_task_job(context.application, task)
         message = f"Task added and scheduled ({task['recurrence']})."
@@ -856,6 +1035,52 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data.pop("admin_state", None)
         return
 
+    if state == "awaiting_edit_task_title":
+        task_id = context.user_data.pop("edit_task_id", None)
+        try:
+            task = store.update_task(task_id, {"title": text})
+            await update.message.reply_text(f"Task title updated to {task['title']}.")
+        except ValueError as exc:
+            await update.message.reply_text(f"Failed: {exc}")
+        context.user_data.pop("admin_state", None)
+        return
+
+    if state == "awaiting_edit_task_description":
+        task_id = context.user_data.pop("edit_task_id", None)
+        try:
+            task = store.update_task(task_id, {"description": text})
+            await update.message.reply_text(f"Task description updated for {task['title']}.")
+        except ValueError as exc:
+            await update.message.reply_text(f"Failed: {exc}")
+        context.user_data.pop("admin_state", None)
+        return
+
+    if state == "awaiting_edit_task_time":
+        if not _valid_hhmm(text):
+            await update.message.reply_text("Invalid time format. Send as HH:MM.")
+            return
+        task_id = context.user_data.pop("edit_task_id", None)
+        try:
+            current_task = store.get_task_by_id(task_id)
+            if (
+                current_task
+                and current_task.get("recurrence") == "once"
+                and current_task.get("scheduled_date")
+                and not _once_schedule_is_future(current_task["scheduled_date"], text)
+            ):
+                await update.message.reply_text(
+                    "The selected date/time is in the past. Send a future time."
+                )
+                context.user_data["edit_task_id"] = task_id
+                return
+            task = store.update_task(task_id, {"time": text})
+            scheduler.schedule_task_job(context.application, task)
+            await update.message.reply_text(f"Task time updated to {task['time']}.")
+        except ValueError as exc:
+            await update.message.reply_text(f"Failed: {exc}")
+        context.user_data.pop("admin_state", None)
+        return
+
     if state == "awaiting_owner_telegram_id":
         if not text.isdigit():
             await update.message.reply_text("Telegram ID must be numeric. Send again.")
@@ -900,14 +1125,23 @@ async def admin_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         draft = context.user_data.get("task_draft", {})
         draft["description"] = text
         context.user_data["task_draft"] = draft
-        context.user_data["admin_state"] = "awaiting_task_role"
-        roles = store.list_roles()
+        context.user_data["admin_state"] = "awaiting_task_penalty"
         keyboard = [
-            [InlineKeyboardButton(role, callback_data=f"{ADMIN_TASK_ROLE_PREFIX}{role}")]
-            for role in roles
+            [
+                InlineKeyboardButton(
+                    "Normal points",
+                    callback_data=f"{ADMIN_TASK_PENALTY_PREFIX}normal",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "No deduction on rejection",
+                    callback_data=f"{ADMIN_TASK_PENALTY_PREFIX}no_penalty",
+                )
+            ],
         ]
         await update.message.reply_text(
-            "Select role for this task:",
+            "Should this task deduct points if the manager rejects the worker response?",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return

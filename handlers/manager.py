@@ -30,6 +30,7 @@ MANAGER_TASK_ROLE_PREFIX = f"{MANAGER_PREFIX}task_role:"
 MANAGER_TASK_RECURRENCE_PREFIX = f"{MANAGER_PREFIX}task_recurrence:"
 MANAGER_TASK_WEEKDAY_PREFIX = f"{MANAGER_PREFIX}task_weekday:"
 MANAGER_TASK_PARENT_PREFIX = f"{MANAGER_PREFIX}task_parent:"
+MANAGER_TASK_PENALTY_PREFIX = f"{MANAGER_PREFIX}task_penalty:"
 
 OWNER_PREFIX = "owner:"
 OWNER_LIST_TASKS = f"{OWNER_PREFIX}list_tasks"
@@ -189,6 +190,11 @@ async def manager_verify_callback(update: Update, context: ContextTypes.DEFAULT_
             task_title = task["title"] if task else "Task"
             worker_text = run["worker_role"]
             worker_notified = False
+            points_text = (
+                "No points deducted for this no-penalty task."
+                if task and task.get("no_penalty")
+                else "-2 points deducted."
+            )
             if worker:
                 worker_text = f"{worker['name']} ({run['worker_role']})"
                 try:
@@ -199,7 +205,7 @@ async def manager_verify_callback(update: Update, context: ContextTypes.DEFAULT_
                             f"Task: {task_title}\n"
                             f"Role: {run['worker_role']}\n"
                             "Status: Rejected. Please coordinate with your manager.\n"
-                            "-2 points deducted.\n"
+                            f"{points_text}\n"
                             f"Current points: {(updated_worker or worker).get('points', 0)}"
                         ),
                     )
@@ -274,6 +280,29 @@ async def manager_action_callback(update: Update, context: ContextTypes.DEFAULT_
         ]
         await query.edit_message_text(
             "Select worker to deduct 2 points from:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data.startswith(MANAGER_TASK_PENALTY_PREFIX):
+        value = data.replace(MANAGER_TASK_PENALTY_PREFIX, "", 1)
+        draft = context.user_data.get("manager_task_draft", {})
+        draft["no_penalty"] = value == "no_penalty"
+        context.user_data["manager_task_draft"] = draft
+        roles = await db_async.db_call(store.list_roles_for_manager, manager["id"])
+        if not roles:
+            await query.edit_message_text(
+                "No roles are under you yet. Use /manager -> Add Role first."
+            )
+            context.user_data.pop("manager_state", None)
+            context.user_data.pop("manager_task_draft", None)
+            return
+        keyboard = [
+            [InlineKeyboardButton(role, callback_data=f"{MANAGER_TASK_ROLE_PREFIX}{role}")]
+            for role in roles
+        ]
+        await query.edit_message_text(
+            "Select role for this task:",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return
@@ -483,13 +512,17 @@ def _format_task_row(index: int, task: dict) -> str:
         if recurrence == "after_task" and task.get("parent_task_title")
         else ""
     )
+    description = task.get("description") or "No description"
+    penalty_text = "\n   Points: No deduction on rejection" if task.get("no_penalty") else ""
     return (
         f"{index}. {task['title']}\n"
+        f"   Description: {description}\n"
         f"   Worker Role: {task['worker_role']}\n"
         f"   Worker: {task['worker_name']}\n"
         f"{manager_text}"
         f"   Time: {time_text}\n"
         f"   Repeat: {repeat_text}"
+        f"{penalty_text}"
         f"{parent_text}"
         f"{date_text}"
     )
@@ -560,6 +593,21 @@ async def _send_owner_worker_list(query, owner_id: str) -> None:
         for index, worker in enumerate(workers, start=1)
     ]
     await query.edit_message_text("Worker List\n\n" + "\n\n".join(worker_lines))
+
+
+async def _send_manager_task_role_choices(target, manager_id: str) -> None:
+    roles = await db_async.db_call(store.list_roles_for_manager, manager_id)
+    if not roles:
+        await target.reply_text("No roles are under you yet. Use /manager -> Add Role first.")
+        return
+    keyboard = [
+        [InlineKeyboardButton(role, callback_data=f"{MANAGER_TASK_ROLE_PREFIX}{role}")]
+        for role in roles
+    ]
+    await target.reply_text(
+        "Select role for this task:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
 
 
 async def _report_scope_for_user(telegram_id: int) -> dict:
@@ -677,6 +725,7 @@ async def _create_task_from_draft(
             weekday=draft.get("weekday"),
             scheduled_date=draft.get("scheduled_date"),
             depends_on_task_id=draft.get("depends_on_task_id"),
+            no_penalty=draft.get("no_penalty", False),
         )
         scheduler.schedule_task_job(context.application, task)
         message = f"Task added and scheduled ({task['recurrence']})."
@@ -721,20 +770,23 @@ async def manager_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         draft = context.user_data.get("manager_task_draft", {})
         draft["description"] = text
         context.user_data["manager_task_draft"] = draft
-        roles = await db_async.db_call(store.list_roles_for_manager, manager["id"])
-        if not roles:
-            await update.message.reply_text(
-                "No roles are under you yet. Use /manager -> Add Role first."
-            )
-            context.user_data.pop("manager_state", None)
-            context.user_data.pop("manager_task_draft", None)
-            return
+        context.user_data["manager_state"] = "awaiting_task_penalty"
         keyboard = [
-            [InlineKeyboardButton(role, callback_data=f"{MANAGER_TASK_ROLE_PREFIX}{role}")]
-            for role in roles
+            [
+                InlineKeyboardButton(
+                    "Normal points",
+                    callback_data=f"{MANAGER_TASK_PENALTY_PREFIX}normal",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "No deduction on rejection",
+                    callback_data=f"{MANAGER_TASK_PENALTY_PREFIX}no_penalty",
+                )
+            ],
         ]
         await update.message.reply_text(
-            "Select role for this task:",
+            "Should this task deduct points if the manager rejects the worker response?",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return
@@ -828,19 +880,22 @@ def _format_report_text(role: str, period: str, summary: dict[str, Any]) -> str:
         for worker in report_workers
     ]
 
-    max_tasks_to_show = 12
     task_metrics = summary["task_metrics"]
     task_lines: list[str] = []
-    for index, metric in enumerate(task_metrics[:max_tasks_to_show], start=1):
+    for index, metric in enumerate(task_metrics, start=1):
+        description = metric.get("description") or "No description"
+        penalty_text = " | No-penalty" if metric.get("no_penalty") else ""
         task_lines.append(
             f"{index}) {metric['title']}\n"
+            f"   Description: {description}\n"
             f"   Total: {metric['total']} | Verified: {metric['verified']} | "
             f"NO: {metric['not_done']} | Rejected: {metric['rejected']} | "
-            f"Pending manager: {metric['pending_manager']}"
+            f"Pending worker: {metric['pending_response']} | "
+            f"Pending manager: {metric['pending_manager']}{penalty_text}"
         )
-    if summary["total_task_groups"] > max_tasks_to_show:
+    if summary["total_task_groups"] > len(task_metrics):
         task_lines.append(
-            f"...and {summary['total_task_groups'] - max_tasks_to_show} more tasks."
+            f"...and {summary['total_task_groups'] - len(task_metrics)} more tasks."
         )
 
     role_label = "All" if role == "all" else role
@@ -864,9 +919,23 @@ def _format_report_text(role: str, period: str, summary: dict[str, Any]) -> str:
         "Task-wise metrics:\n"
         + ("\n".join(task_lines) if task_lines else "No task runs in this period.")
     )
-    if len(report_text) > 4000:
-        report_text = report_text[:3990] + "\n...(truncated)"
     return report_text
+
+
+def _split_message(text: str, limit: int = 3900) -> list[str]:
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > limit:
+        split_at = remaining.rfind("\n\n", 0, limit)
+        if split_at == -1:
+            split_at = remaining.rfind("\n", 0, limit)
+        if split_at == -1:
+            split_at = limit
+        chunks.append(remaining[:split_at].strip())
+        remaining = remaining[split_at:].strip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks
 
 
 async def report_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -919,6 +988,12 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                         callback_data=f"{REPORT_PERIOD_PREFIX}all|{role}",
                     ),
                 ],
+                [
+                    InlineKeyboardButton(
+                        "Pending Tasks",
+                        callback_data=f"{REPORT_PERIOD_PREFIX}pending|{role}",
+                    )
+                ],
             ]
             await query.edit_message_text(
                 f"Selected role: {role}. Select period:",
@@ -945,5 +1020,9 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 owner_id=scope["owner_id"],
             )
             report_text = _format_report_text(role, period, summary)
-            await query.edit_message_text(report_text)
+            chunks = _split_message(report_text)
+            await query.edit_message_text(chunks[0])
+            if query.message:
+                for chunk in chunks[1:]:
+                    await query.message.reply_text(chunk)
             return

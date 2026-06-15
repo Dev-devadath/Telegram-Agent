@@ -8,12 +8,13 @@ from telegram.ext import Application, CallbackContext
 
 import db_async
 import store
-from config import TIMEZONE
+from config import TASK_REMINDER_MINUTES, TIMEZONE
 from performance import OperationTimer
 
 
 TASK_JOB_PREFIX = "task_daily:"
 EXTEND_JOB_PREFIX = "task_extend:"
+REMINDER_JOB_PREFIX = "task_reminder:"
 logger = logging.getLogger(__name__)
 
 
@@ -65,7 +66,11 @@ def _task_keyboard(run_id: str) -> InlineKeyboardMarkup:
 
 def clear_all_task_jobs(application: Application) -> None:
     for job in application.job_queue.jobs():
-        if job.name.startswith(TASK_JOB_PREFIX) or job.name.startswith(EXTEND_JOB_PREFIX):
+        if (
+            job.name.startswith(TASK_JOB_PREFIX)
+            or job.name.startswith(EXTEND_JOB_PREFIX)
+            or job.name.startswith(REMINDER_JOB_PREFIX)
+        ):
             job.schedule_removal()
 
 
@@ -113,6 +118,17 @@ def schedule_extension_for_run(application: Application, run_id: str, minutes: i
         when=minutes * 60,
         data={"run_id": run_id, "minutes": minutes},
         name=f"{EXTEND_JOB_PREFIX}{run_id}:{datetime.utcnow().timestamp()}",
+    )
+
+
+def schedule_no_response_reminder(application: Application, run_id: str) -> None:
+    if TASK_REMINDER_MINUTES <= 0:
+        return
+    application.job_queue.run_once(
+        no_response_reminder_callback,
+        when=TASK_REMINDER_MINUTES * 60,
+        data={"run_id": run_id},
+        name=f"{REMINDER_JOB_PREFIX}{run_id}",
     )
 
 
@@ -167,6 +183,7 @@ async def fire_task_now(
         if not delivery:
             return None
         await _send_delivery_message(context, delivery)
+        schedule_no_response_reminder(context.application, delivery["run"]["id"])
         return delivery["run"]
 
 
@@ -248,6 +265,31 @@ async def extension_task_callback(context: CallbackContext) -> None:
         delivery = await db_async.db_call(store.get_run_delivery_context, run_id)
         if not delivery:
             logger.info("Extension reminder skipped for run_id=%s", run_id)
+            return
+        await _send_delivery_message(
+            context,
+            {
+                "run": delivery["run"],
+                "task": {
+                    "title": delivery["task_title"],
+                    "description": delivery["task_description"],
+                },
+                "chat_id": delivery["chat_id"],
+            },
+            is_reminder=True,
+        )
+        schedule_no_response_reminder(context.application, run_id)
+
+
+async def no_response_reminder_callback(context: CallbackContext) -> None:
+    run_id = context.job.data["run_id"]
+    with OperationTimer("scheduler.no_response_reminder_callback", run_id=run_id):
+        run = await db_async.db_call(store.get_task_run, run_id)
+        if not run or (run.get("worker_response") and run.get("status") != "sent_to_worker"):
+            return
+        delivery = await db_async.db_call(store.get_run_delivery_context, run_id)
+        if not delivery:
+            logger.info("No-response reminder skipped for run_id=%s", run_id)
             return
         await _send_delivery_message(
             context,

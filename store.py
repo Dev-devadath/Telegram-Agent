@@ -136,6 +136,7 @@ def _run_schema(conn) -> None:
             scheduled_date text,
             recurrence text not null default 'daily',
             weekday integer,
+            no_penalty boolean not null default false,
             active boolean not null default true,
             created_at text not null,
             deleted_at text,
@@ -167,6 +168,7 @@ def _run_schema(conn) -> None:
             check (role in ('admin', 'owner', 'manager', 'worker'));
         alter table tasks add column if not exists scheduled_date text;
         alter table tasks add column if not exists depends_on_task_id text references tasks(id) on delete set null;
+        alter table tasks add column if not exists no_penalty boolean not null default false;
         alter table task_runs add column if not exists worker_note text;
 
         create table if not exists firings (
@@ -891,6 +893,7 @@ def add_task(
     weekday: int | None = None,
     scheduled_date: str | None = None,
     depends_on_task_id: str | None = None,
+    no_penalty: bool = False,
 ) -> dict[str, Any]:
     with _connect() as conn:
         role = conn.execute("select * from roles where name = %s", (worker_role,)).fetchone()
@@ -936,9 +939,9 @@ def add_task(
             """
             insert into tasks (
                 id, title, description, worker_role, manager_id, depends_on_task_id, time,
-                scheduled_date, recurrence, weekday, active, created_at
+                scheduled_date, recurrence, weekday, no_penalty, active, created_at
             )
-            values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, true, %s)
+            values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, true, %s)
             returning *
             """,
             (
@@ -952,6 +955,7 @@ def add_task(
                 scheduled_date,
                 recurrence,
                 weekday,
+                no_penalty,
                 _now_iso(),
             ),
         ).fetchone()
@@ -1108,6 +1112,33 @@ def list_active_tasks() -> list[dict[str, Any]]:
         ).fetchall()
 
 
+def list_tasks_for_admin() -> list[dict[str, Any]]:
+    with _connect() as conn:
+        return conn.execute(
+            """
+            select
+                t.*,
+                parent.title as parent_task_title,
+                coalesce(u.name, 'Unassigned') as worker_name,
+                u.telegram_id as worker_telegram_id,
+                m.name as manager_name
+            from tasks t
+            left join tasks parent
+              on parent.id = t.depends_on_task_id
+            join users m
+              on m.id = t.manager_id
+             and m.role = 'manager'
+             and m.active = true
+            left join users u
+              on u.role = 'worker'
+             and u.worker_role = t.worker_role
+             and u.active = true
+            where t.active = true
+            order by m.name, t.created_at
+            """
+        ).fetchall()
+
+
 def list_parent_task_options(manager_id: str | None = None) -> list[dict[str, Any]]:
     query = """
         select t.id, t.title, t.worker_role, t.manager_id
@@ -1208,6 +1239,7 @@ def update_task(task_id: str, updates: dict[str, Any]) -> dict[str, Any]:
         "scheduled_date",
         "recurrence",
         "weekday",
+        "no_penalty",
         "active",
         "deleted_at",
         "deleted_by_manager_id",
@@ -1402,6 +1434,8 @@ def _report_filter_clause(
             ")"
         )
         params.append(owner_id)
+    if period == "pending":
+        query += " and tr.worker_response is null and tr.status = 'sent_to_worker'"
     from_time = _report_from_time(period)
     if from_time:
         query += " and tr.created_at >= %s"
@@ -1414,7 +1448,7 @@ def get_report_summary(
     period: str = "today",
     manager_id: str | None = None,
     owner_id: str | None = None,
-    top_tasks: int = 12,
+    top_tasks: int = 50,
 ) -> dict[str, Any]:
     filter_clause, params = _report_filter_clause(
         worker_role, period, manager_id, owner_id
@@ -1447,9 +1481,12 @@ def get_report_summary(
             select
                 tr.task_id,
                 coalesce(t.title, 'Unknown Task') as title,
+                coalesce(t.description, '') as description,
+                coalesce(t.no_penalty, false) as no_penalty,
                 count(*) as total,
                 count(*) filter (where tr.status = 'manager_verified') as verified,
                 count(*) filter (where tr.worker_response = 'no') as not_done,
+                count(*) filter (where tr.worker_response is null) as pending_response,
                 count(*) filter (where tr.status = 'manager_rejected') as rejected,
                 count(*) filter (
                     where tr.worker_response in ('yes', 'no')
@@ -1458,7 +1495,7 @@ def get_report_summary(
             from task_runs tr
             left join tasks t on t.id = tr.task_id
             {filter_clause}
-            group by tr.task_id, t.title
+            group by tr.task_id, t.title, t.description, t.no_penalty
             order by count(*) desc
             limit %s
             """,
@@ -1622,6 +1659,11 @@ def verify_task_run(run_id: str) -> dict[str, Any]:
             (run["worker_role"],),
         ).fetchone()
 
+        task = conn.execute(
+            "select * from tasks where id = %s",
+            (run["task_id"],),
+        ).fetchone()
+
         updated_worker = worker
         if worker and not was_already_finalized:
             updated_worker = conn.execute(
@@ -1633,11 +1675,6 @@ def verify_task_run(run_id: str) -> dict[str, Any]:
                 """,
                 (worker["id"],),
             ).fetchone()
-
-        task = conn.execute(
-            "select * from tasks where id = %s",
-            (run["task_id"],),
-        ).fetchone()
 
         dependent_tasks: list[dict[str, Any]] = []
         if not was_already_finalized:
@@ -1698,8 +1735,13 @@ def reject_task_run(run_id: str) -> dict[str, Any]:
             (run["worker_role"],),
         ).fetchone()
 
+        task = conn.execute(
+            "select * from tasks where id = %s",
+            (run["task_id"],),
+        ).fetchone()
+
         updated_worker = worker
-        if worker and not was_already_finalized:
+        if worker and not (task and task.get("no_penalty")) and not was_already_finalized:
             updated_worker = conn.execute(
                 """
                 update users
@@ -1709,11 +1751,6 @@ def reject_task_run(run_id: str) -> dict[str, Any]:
                 """,
                 (worker["id"],),
             ).fetchone()
-
-        task = conn.execute(
-            "select * from tasks where id = %s",
-            (run["task_id"],),
-        ).fetchone()
 
     return {
         "run": run,

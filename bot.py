@@ -3,7 +3,7 @@ import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -92,6 +92,20 @@ async def post_shutdown(_application: Application) -> None:
     logger.info("Database pool and executor shut down")
 
 
+async def post_init(application: Application) -> None:
+    await application.bot.set_my_commands(
+        [
+            BotCommand("start", "Register or open your workspace"),
+            BotCommand("demo", "Try a quick self-guided demo"),
+            BotCommand("admin", "Open admin panel"),
+            BotCommand("manager", "Open manager panel"),
+            BotCommand("owner", "Open owner panel"),
+            BotCommand("report", "View reports"),
+            BotCommand("help", "Show help"),
+        ]
+    )
+
+
 def main() -> None:
     if not BOT_TOKEN or BOT_TOKEN == "replace_with_bot_token":
         raise RuntimeError("Set BOT_TOKEN in .env before running the bot.")
@@ -102,6 +116,7 @@ def main() -> None:
         Application.builder()
         .token(BOT_TOKEN)
         .concurrent_updates(True)
+        .post_init(post_init)
         .post_shutdown(post_shutdown)
         .build()
     )
