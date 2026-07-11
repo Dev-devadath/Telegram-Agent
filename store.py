@@ -170,6 +170,7 @@ def _run_schema(conn) -> None:
         alter table tasks add column if not exists depends_on_task_id text references tasks(id) on delete set null;
         alter table tasks add column if not exists no_penalty boolean not null default false;
         alter table task_runs add column if not exists worker_note text;
+        alter table tasks add column if not exists verifier_id text references users(id) on delete set null;
 
         create table if not exists firings (
             id text primary key,
@@ -894,6 +895,7 @@ def add_task(
     scheduled_date: str | None = None,
     depends_on_task_id: str | None = None,
     no_penalty: bool = False,
+    verifier_id: str | None = None,
 ) -> dict[str, Any]:
     with _connect() as conn:
         role = conn.execute("select * from roles where name = %s", (worker_role,)).fetchone()
@@ -906,6 +908,16 @@ def add_task(
         ).fetchone()
         if not manager:
             raise ValueError("Invalid manager.")
+
+        if verifier_id == manager_id:
+            verifier_id = None
+        if verifier_id:
+            verifier = conn.execute(
+                "select 1 from users where id = %s and role = 'manager' and active = true",
+                (verifier_id,),
+            ).fetchone()
+            if not verifier:
+                raise ValueError("Verifier must be an active manager.")
 
         if role.get("manager_id") and role["manager_id"] != manager_id:
             raise ValueError("This role belongs to another manager.")
@@ -939,9 +951,9 @@ def add_task(
             """
             insert into tasks (
                 id, title, description, worker_role, manager_id, depends_on_task_id, time,
-                scheduled_date, recurrence, weekday, no_penalty, active, created_at
+                scheduled_date, recurrence, weekday, no_penalty, verifier_id, active, created_at
             )
-            values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, true, %s)
+            values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, true, %s)
             returning *
             """,
             (
@@ -956,6 +968,7 @@ def add_task(
                 recurrence,
                 weekday,
                 no_penalty,
+                verifier_id,
                 _now_iso(),
             ),
         ).fetchone()
@@ -1023,6 +1036,51 @@ def fire_worker(worker_id: str, manager_id: str, reason: str) -> dict[str, Any]:
         ).fetchone()
         firing["worker_points"] = updated_worker["points"] if updated_worker else None
         return firing
+
+
+def terminate_worker(worker_id: str, manager_id: str | None = None) -> dict[str, Any]:
+    """Deactivate a worker (resigned/terminated) so their role becomes claimable again.
+
+    When manager_id is given, the worker must belong to a role under that manager.
+    """
+    with _connect() as conn:
+        worker = conn.execute(
+            "select * from users where id = %s and role = 'worker' and active = true",
+            (worker_id,),
+        ).fetchone()
+        if not worker:
+            raise ValueError("Active worker not found.")
+
+        if manager_id:
+            managed_role = conn.execute(
+                """
+                select 1
+                where %s in (
+                    select name from roles where manager_id = %s
+                    union
+                    select worker_role from tasks where manager_id = %s and active = true
+                )
+                """,
+                (worker["worker_role"], manager_id, manager_id),
+            ).fetchone()
+            if not managed_role:
+                raise ValueError("This worker is not under this manager.")
+
+        conn.execute(
+            """
+            update users
+            set active = false,
+                removed_at = %s,
+                removed_by_admin_reason = %s
+            where id = %s
+            """,
+            (
+                _now_iso(),
+                "Terminated by manager" if manager_id else "Terminated by admin",
+                worker_id,
+            ),
+        )
+        return worker
 
 
 def remove_manager(manager_id: str) -> dict[str, Any]:
@@ -1121,7 +1179,8 @@ def list_tasks_for_admin() -> list[dict[str, Any]]:
                 parent.title as parent_task_title,
                 coalesce(u.name, 'Unassigned') as worker_name,
                 u.telegram_id as worker_telegram_id,
-                m.name as manager_name
+                m.name as manager_name,
+                v.name as verifier_name
             from tasks t
             left join tasks parent
               on parent.id = t.depends_on_task_id
@@ -1129,6 +1188,9 @@ def list_tasks_for_admin() -> list[dict[str, Any]]:
               on m.id = t.manager_id
              and m.role = 'manager'
              and m.active = true
+            left join users v
+              on v.id = t.verifier_id
+             and v.active = true
             left join users u
               on u.role = 'worker'
              and u.worker_role = t.worker_role
@@ -1179,10 +1241,14 @@ def list_tasks_for_manager(manager_id: str) -> list[dict[str, Any]]:
                 t.*,
                 parent.title as parent_task_title,
                 coalesce(u.name, 'Unassigned') as worker_name,
-                u.telegram_id as worker_telegram_id
+                u.telegram_id as worker_telegram_id,
+                v.name as verifier_name
             from tasks t
             left join tasks parent
               on parent.id = t.depends_on_task_id
+            left join users v
+              on v.id = t.verifier_id
+             and v.active = true
             left join users u
               on u.role = 'worker'
              and u.worker_role = t.worker_role
@@ -1203,10 +1269,14 @@ def list_tasks_for_owner(owner_id: str) -> list[dict[str, Any]]:
                 parent.title as parent_task_title,
                 coalesce(u.name, 'Unassigned') as worker_name,
                 u.telegram_id as worker_telegram_id,
-                m.name as manager_name
+                m.name as manager_name,
+                v.name as verifier_name
             from tasks t
             left join tasks parent
               on parent.id = t.depends_on_task_id
+            left join users v
+              on v.id = t.verifier_id
+             and v.active = true
             join users m
               on m.id = t.manager_id
              and m.role = 'manager'
@@ -1240,6 +1310,7 @@ def update_task(task_id: str, updates: dict[str, Any]) -> dict[str, Any]:
         "recurrence",
         "weekday",
         "no_penalty",
+        "verifier_id",
         "active",
         "deleted_at",
         "deleted_by_manager_id",
@@ -1483,6 +1554,8 @@ def get_report_summary(
                 coalesce(t.title, 'Unknown Task') as title,
                 coalesce(t.description, '') as description,
                 coalesce(t.no_penalty, false) as no_penalty,
+                tr.worker_role,
+                coalesce(w.name, 'Unassigned') as worker_name,
                 count(*) as total,
                 count(*) filter (where tr.status = 'manager_verified') as verified,
                 count(*) filter (where tr.worker_response = 'no') as not_done,
@@ -1494,12 +1567,29 @@ def get_report_summary(
                 ) as pending_manager
             from task_runs tr
             left join tasks t on t.id = tr.task_id
+            left join users w
+              on w.role = 'worker'
+             and w.worker_role = tr.worker_role
+             and w.active = true
             {filter_clause}
-            group by tr.task_id, t.title, t.description, t.no_penalty
+            group by tr.task_id, t.title, t.description, t.no_penalty, tr.worker_role, w.name
             order by count(*) desc
             limit %s
             """,
             [*params, top_tasks + 1],
+        ).fetchall()
+
+        role_performance_rows = conn.execute(
+            f"""
+            select
+                tr.worker_role,
+                count(*) as total,
+                count(*) filter (where tr.status = 'manager_verified') as verified
+            from task_runs tr
+            {filter_clause}
+            group by tr.worker_role
+            """,
+            params,
         ).fetchall()
 
         total_task_groups = conn.execute(
@@ -1593,6 +1683,13 @@ def get_report_summary(
         "task_metrics": task_metrics[:top_tasks],
         "total_task_groups": int(total_task_groups["group_count"] or 0),
         "workers": workers,
+        "role_performance": {
+            row["worker_role"]: {
+                "total": int(row["total"] or 0),
+                "verified": int(row["verified"] or 0),
+            }
+            for row in role_performance_rows
+        },
     }
 
 
@@ -1604,15 +1701,19 @@ def get_verification_context(run_id: str) -> dict[str, Any] | None:
                 tr.*,
                 t.title as task_title,
                 t.description as task_description,
-                m.id as manager_user_id,
-                m.telegram_id as manager_telegram_id,
-                m.name as manager_name,
+                coalesce(v.id, m.id) as manager_user_id,
+                coalesce(v.telegram_id, m.telegram_id) as manager_telegram_id,
+                coalesce(v.name, m.name) as manager_name,
                 w.id as worker_user_id,
                 w.name as worker_name,
                 w.telegram_id as worker_telegram_id
             from task_runs tr
             join tasks t on t.id = tr.task_id
             join users m on m.id = tr.manager_id and m.active = true
+            left join users v
+              on v.id = t.verifier_id
+             and v.role = 'manager'
+             and v.active = true
             left join users w
               on w.role = 'worker'
              and w.worker_role = tr.worker_role

@@ -136,7 +136,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(manager_action_callback, pattern=r"^manager:"))
     app.add_handler(CallbackQueryHandler(owner_action_callback, pattern=r"^owner:"))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^admin:"))
-    app.add_handler(CallbackQueryHandler(report_callback, pattern=r"^report_(role|period):"))
+    app.add_handler(CallbackQueryHandler(report_callback, pattern=r"^report_(role|period|owner):"))
 
     # Text handlers depend on internal user states, so they safely no-op when inactive.
     app.add_handler(

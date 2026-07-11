@@ -17,6 +17,7 @@ REJECT_PREFIX = "reject:"
 
 REPORT_ROLE_PREFIX = "report_role:"
 REPORT_PERIOD_PREFIX = "report_period:"
+REPORT_OWNER_PREFIX = "report_owner:"
 MANAGER_PREFIX = "manager:"
 MANAGER_ADD_ROLE = f"{MANAGER_PREFIX}add_role"
 MANAGER_ADD_TASK = f"{MANAGER_PREFIX}add_task"
@@ -24,6 +25,9 @@ MANAGER_LIST_TASKS = f"{MANAGER_PREFIX}list_tasks"
 MANAGER_LIST_WORKERS = f"{MANAGER_PREFIX}list_workers"
 MANAGER_FIRE_WORKER = f"{MANAGER_PREFIX}fire_worker"
 MANAGER_FIRE_WORKER_PREFIX = f"{MANAGER_PREFIX}fire_worker:"
+MANAGER_TERMINATE_WORKER = f"{MANAGER_PREFIX}terminate_worker"
+MANAGER_TERMINATE_WORKER_PREFIX = f"{MANAGER_PREFIX}terminate_worker:"
+MANAGER_TERMINATE_CONFIRM_PREFIX = f"{MANAGER_PREFIX}terminate_confirm:"
 MANAGER_DELETE_TASK_PREFIX = f"{MANAGER_PREFIX}delete_task:"
 MANAGER_DELETE_TASK_CONFIRM_PREFIX = f"{MANAGER_PREFIX}delete_task_confirm:"
 MANAGER_TASK_ROLE_PREFIX = f"{MANAGER_PREFIX}task_role:"
@@ -31,6 +35,7 @@ MANAGER_TASK_RECURRENCE_PREFIX = f"{MANAGER_PREFIX}task_recurrence:"
 MANAGER_TASK_WEEKDAY_PREFIX = f"{MANAGER_PREFIX}task_weekday:"
 MANAGER_TASK_PARENT_PREFIX = f"{MANAGER_PREFIX}task_parent:"
 MANAGER_TASK_PENALTY_PREFIX = f"{MANAGER_PREFIX}task_penalty:"
+MANAGER_TASK_VERIFIER_PREFIX = f"{MANAGER_PREFIX}task_verifier:"
 
 OWNER_PREFIX = "owner:"
 OWNER_LIST_TASKS = f"{OWNER_PREFIX}list_tasks"
@@ -79,6 +84,7 @@ def manager_menu_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("Task List", callback_data=MANAGER_LIST_TASKS)],
         [InlineKeyboardButton("Worker List", callback_data=MANAGER_LIST_WORKERS)],
         [InlineKeyboardButton("Deduct Worker Points", callback_data=MANAGER_FIRE_WORKER)],
+        [InlineKeyboardButton("Terminate Staff", callback_data=MANAGER_TERMINATE_WORKER)],
         [InlineKeyboardButton("Reports", callback_data=f"{REPORT_ROLE_PREFIX}all")],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -284,6 +290,79 @@ async def manager_action_callback(update: Update, context: ContextTypes.DEFAULT_
         )
         return
 
+    if data == MANAGER_TERMINATE_WORKER:
+        workers = await db_async.db_call(store.list_workers_under_manager, manager["id"])
+        if not workers:
+            await query.edit_message_text("No active workers are assigned under you.")
+            return
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    f"{worker['worker_role']} - {worker['name']}",
+                    callback_data=f"{MANAGER_TERMINATE_WORKER_PREFIX}{worker['id']}",
+                )
+            ]
+            for worker in workers
+        ]
+        await query.edit_message_text(
+            "Select staff to terminate (their role becomes available again):",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data.startswith(MANAGER_TERMINATE_CONFIRM_PREFIX):
+        worker_id = data.replace(MANAGER_TERMINATE_CONFIRM_PREFIX, "", 1)
+        try:
+            worker = await db_async.db_call(
+                store.terminate_worker, worker_id, manager["id"]
+            )
+        except ValueError as exc:
+            await query.edit_message_text(f"Failed to terminate staff: {exc}")
+            return
+
+        try:
+            await context.bot.send_message(
+                chat_id=worker["telegram_id"],
+                text=(
+                    "You have been removed from your role.\n"
+                    f"Role: {worker.get('worker_role')}\n"
+                    "Please contact your manager for details."
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "Failed to notify terminated worker worker_id=%s", worker_id
+            )
+        await query.edit_message_text(
+            f"Staff terminated: {worker['name']} ({worker.get('worker_role')}).\n"
+            "The role is now available for a new registration."
+        )
+        return
+
+    if data.startswith(MANAGER_TERMINATE_WORKER_PREFIX):
+        worker_id = data.replace(MANAGER_TERMINATE_WORKER_PREFIX, "", 1)
+        worker = await db_async.db_call(store.get_user_by_id, worker_id)
+        if not worker or worker.get("role") != "worker":
+            await query.edit_message_text("Worker not found.")
+            return
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "Confirm Terminate",
+                    callback_data=f"{MANAGER_TERMINATE_CONFIRM_PREFIX}{worker_id}",
+                )
+            ],
+            [InlineKeyboardButton("Cancel", callback_data=MANAGER_TERMINATE_WORKER)],
+        ]
+        await query.edit_message_text(
+            f"Terminate {worker['name']} ({worker.get('worker_role')})?\n"
+            "They will be logged out and the role becomes claimable again.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
     if data.startswith(MANAGER_TASK_PENALTY_PREFIX):
         value = data.replace(MANAGER_TASK_PENALTY_PREFIX, "", 1)
         draft = context.user_data.get("manager_task_draft", {})
@@ -311,6 +390,37 @@ async def manager_action_callback(update: Update, context: ContextTypes.DEFAULT_
         role = data.replace(MANAGER_TASK_ROLE_PREFIX, "", 1)
         draft = context.user_data.get("manager_task_draft", {})
         draft["worker_role"] = role
+        context.user_data["manager_task_draft"] = draft
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "Me (verify myself)",
+                    callback_data=f"{MANAGER_TASK_VERIFIER_PREFIX}self",
+                )
+            ]
+        ]
+        managers = await db_async.db_call(store.list_users_by_role, "manager")
+        for candidate in managers:
+            if candidate["id"] == manager["id"]:
+                continue
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        candidate["name"],
+                        callback_data=f"{MANAGER_TASK_VERIFIER_PREFIX}{candidate['id']}",
+                    )
+                ]
+            )
+        await query.edit_message_text(
+            "Who should verify this task when the worker responds?",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data.startswith(MANAGER_TASK_VERIFIER_PREFIX):
+        value = data.replace(MANAGER_TASK_VERIFIER_PREFIX, "", 1)
+        draft = context.user_data.get("manager_task_draft", {})
+        draft["verifier_id"] = None if value == "self" else value
         context.user_data["manager_task_draft"] = draft
         keyboard = [
             [
@@ -507,6 +617,9 @@ def _format_task_row(index: int, task: dict) -> str:
         time_text = task["time"]
         date_text = f"\n   Date: {task['scheduled_date']}" if task.get("scheduled_date") else ""
     manager_text = f"   Manager: {task['manager_name']}\n" if task.get("manager_name") else ""
+    verifier_text = (
+        f"   Verifier: {task['verifier_name']}\n" if task.get("verifier_name") else ""
+    )
     parent_text = (
         f"\n   After: {task['parent_task_title']}"
         if recurrence == "after_task" and task.get("parent_task_title")
@@ -520,6 +633,7 @@ def _format_task_row(index: int, task: dict) -> str:
         f"   Worker Role: {task['worker_role']}\n"
         f"   Worker: {task['worker_name']}\n"
         f"{manager_text}"
+        f"{verifier_text}"
         f"   Time: {time_text}\n"
         f"   Repeat: {repeat_text}"
         f"{penalty_text}"
@@ -653,8 +767,49 @@ async def _send_report_role_choices(
     target,
     telegram_id: int,
     context: ContextTypes.DEFAULT_TYPE | None = None,
+    owner_choice: str | None = None,
 ) -> None:
     scope = await _report_scope_for_user(telegram_id)
+
+    if scope["type"] == "admin" and owner_choice is None:
+        owners = await db_async.db_call(store.list_users_by_role, "owner")
+        if owners:
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "All Companies",
+                        callback_data=f"{REPORT_OWNER_PREFIX}all",
+                    )
+                ]
+            ]
+            for owner in owners:
+                keyboard.append(
+                    [
+                        InlineKeyboardButton(
+                            owner["name"],
+                            callback_data=f"{REPORT_OWNER_PREFIX}{owner['id']}",
+                        )
+                    ]
+                )
+            markup = InlineKeyboardMarkup(keyboard)
+            if hasattr(target, "edit_message_text"):
+                await target.edit_message_text("Select company:", reply_markup=markup)
+            else:
+                await target.reply_text("Select company:", reply_markup=markup)
+            return
+
+    if scope["type"] == "admin" and owner_choice and owner_choice != "all":
+        owner = await db_async.db_call(store.get_user_by_id, owner_choice)
+        if not owner or owner.get("role") != "owner":
+            text = "Company not found."
+            if hasattr(target, "edit_message_text"):
+                await target.edit_message_text(text)
+            else:
+                await target.reply_text(text)
+            return
+        scope["owner_id"] = owner_choice
+        scope["roles"] = await db_async.db_call(store.list_roles_for_owner, owner_choice)
+
     if context is not None:
         context.user_data["report_scope"] = scope
     roles = scope["roles"]
@@ -726,6 +881,7 @@ async def _create_task_from_draft(
             scheduled_date=draft.get("scheduled_date"),
             depends_on_task_id=draft.get("depends_on_task_id"),
             no_penalty=draft.get("no_penalty", False),
+            verifier_id=draft.get("verifier_id"),
         )
         scheduler.schedule_task_job(context.application, task)
         message = f"Task added and scheduled ({task['recurrence']})."
@@ -874,20 +1030,36 @@ def _format_report_text(role: str, period: str, summary: dict[str, Any]) -> str:
         int((stats["verified"] / stats["total"]) * 100) if stats["total"] else 0
     )
     report_workers = summary["workers"]
+    role_performance = summary.get("role_performance", {})
     total_worker_points = sum(worker.get("points", 0) for worker in report_workers)
-    point_lines = [
-        f"{worker['name']} ({worker['worker_role']}): {worker.get('points', 0)}"
-        for worker in report_workers
-    ]
+    point_lines = []
+    for worker in report_workers:
+        perf = role_performance.get(worker["worker_role"])
+        if perf and perf["total"]:
+            # Performance = points earned (1 per verified task) / max earnable points.
+            percentage = round(perf["verified"] * 100 / perf["total"])
+            perf_text = (
+                f" | Performance: {percentage}% "
+                f"({perf['verified']}/{perf['total']} pts)"
+            )
+        else:
+            perf_text = " | Performance: n/a"
+        point_lines.append(
+            f"{worker['name']} ({worker['worker_role']}): "
+            f"{worker.get('points', 0)}{perf_text}"
+        )
 
     task_metrics = summary["task_metrics"]
     task_lines: list[str] = []
     for index, metric in enumerate(task_metrics, start=1):
         description = metric.get("description") or "No description"
         penalty_text = " | No-penalty" if metric.get("no_penalty") else ""
+        worker_label = metric.get("worker_name") or "Unassigned"
+        role_label_line = metric.get("worker_role") or ""
         task_lines.append(
             f"{index}) {metric['title']}\n"
             f"   Description: {description}\n"
+            f"   Worker: {worker_label} ({role_label_line})\n"
             f"   Total: {metric['total']} | Verified: {metric['verified']} | "
             f"NO: {metric['not_done']} | Rejected: {metric['rejected']} | "
             f"Pending worker: {metric['pending_response']} | "
@@ -960,10 +1132,19 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
 
         data = query.data
+        if data.startswith(REPORT_OWNER_PREFIX):
+            owner_choice = data.replace(REPORT_OWNER_PREFIX, "", 1)
+            await _send_report_role_choices(
+                query, query.from_user.id, context, owner_choice=owner_choice
+            )
+            return
+
         if data.startswith(REPORT_ROLE_PREFIX):
             role = data.replace(REPORT_ROLE_PREFIX, "", 1)
-            scope = await _report_scope_for_user(query.from_user.id)
-            context.user_data["report_scope"] = scope
+            scope = context.user_data.get("report_scope")
+            if not scope:
+                scope = await _report_scope_for_user(query.from_user.id)
+                context.user_data["report_scope"] = scope
             if role != "all" and role not in scope["roles"]:
                 await query.edit_message_text("This role is not available in your report scope.")
                 return

@@ -5,6 +5,7 @@ from telegram.ext import ContextTypes
 
 import scheduler
 import store
+from handlers.manager import _send_report_role_choices
 
 ADMIN_PREFIX = "admin:"
 ADMIN_ADD_ROLE = f"{ADMIN_PREFIX}add_role"
@@ -46,6 +47,12 @@ ADMIN_TASK_RECURRENCE_PREFIX = f"{ADMIN_PREFIX}task_recurrence:"
 ADMIN_TASK_WEEKDAY_PREFIX = f"{ADMIN_PREFIX}task_weekday:"
 ADMIN_TASK_PARENT_PREFIX = f"{ADMIN_PREFIX}task_parent:"
 ADMIN_TASK_PENALTY_PREFIX = f"{ADMIN_PREFIX}task_penalty:"
+ADMIN_TASK_VERIFIER_PREFIX = f"{ADMIN_PREFIX}task_verifier:"
+ADMIN_EDIT_TASK_VERIFIER_PREFIX = f"{ADMIN_PREFIX}edit_task_verifier:"
+ADMIN_SET_TASK_VERIFIER_PREFIX = f"{ADMIN_PREFIX}set_task_verifier:"
+ADMIN_TERMINATE_STAFF = f"{ADMIN_PREFIX}terminate_staff"
+ADMIN_TERMINATE_STAFF_PREFIX = f"{ADMIN_PREFIX}terminate_staff:"
+ADMIN_TERMINATE_CONFIRM_PREFIX = f"{ADMIN_PREFIX}terminate_confirm:"
 
 WEEKDAYS = [
     ("Monday", 0),
@@ -71,6 +78,7 @@ def _panel_markup() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("List Owners", callback_data=ADMIN_LIST_OWNERS)],
         [InlineKeyboardButton("List / Edit Managers", callback_data=ADMIN_LIST_MANAGERS)],
         [InlineKeyboardButton("Remove Manager", callback_data=ADMIN_REMOVE_MANAGER)],
+        [InlineKeyboardButton("Terminate Staff", callback_data=ADMIN_TERMINATE_STAFF)],
         [InlineKeyboardButton("Add Task", callback_data=ADMIN_ADD_TASK)],
         [InlineKeyboardButton("List / Edit Tasks", callback_data=ADMIN_LIST_TASKS)],
         [InlineKeyboardButton("Reports", callback_data=ADMIN_REPORT)],
@@ -97,10 +105,12 @@ def _format_admin_task_row(index: int, task: dict) -> str:
     else:
         time_text = task["time"]
     penalty_text = "No deduction on rejection" if task.get("no_penalty") else "Normal points"
+    verifier_text = task.get("verifier_name") or "Task manager"
     return (
         f"{index}. {task['title']}\n"
         f"   Description: {task.get('description') or 'No description'}\n"
         f"   Manager: {task.get('manager_name', 'Unknown')}\n"
+        f"   Verifier: {verifier_text}\n"
         f"   Worker Role: {task['worker_role']}\n"
         f"   Worker: {task.get('worker_name', 'Unassigned')}\n"
         f"   Time: {time_text}\n"
@@ -521,6 +531,73 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
+    if data == ADMIN_TERMINATE_STAFF:
+        workers = store.list_users_by_role("worker")
+        if not workers:
+            await query.edit_message_text("No active workers available.")
+            return
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    f"{worker['worker_role']} - {worker['name']}",
+                    callback_data=f"{ADMIN_TERMINATE_STAFF_PREFIX}{worker['id']}",
+                )
+            ]
+            for worker in workers
+        ]
+        await query.edit_message_text(
+            "Select staff to terminate (their role becomes available again):",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data.startswith(ADMIN_TERMINATE_CONFIRM_PREFIX):
+        worker_id = data.replace(ADMIN_TERMINATE_CONFIRM_PREFIX, "", 1)
+        try:
+            worker = store.terminate_worker(worker_id)
+        except ValueError as exc:
+            await query.edit_message_text(f"Failed to terminate staff: {exc}")
+            return
+
+        try:
+            await context.bot.send_message(
+                chat_id=worker["telegram_id"],
+                text=(
+                    "You have been removed from your role.\n"
+                    f"Role: {worker.get('worker_role')}\n"
+                    "Please contact your manager for details."
+                ),
+            )
+        except Exception:
+            pass
+        await query.edit_message_text(
+            f"Staff terminated: {worker['name']} ({worker.get('worker_role')}).\n"
+            "The role is now available for a new registration."
+        )
+        return
+
+    if data.startswith(ADMIN_TERMINATE_STAFF_PREFIX):
+        worker_id = data.replace(ADMIN_TERMINATE_STAFF_PREFIX, "", 1)
+        worker = store.get_user_by_id(worker_id)
+        if not worker or worker.get("role") != "worker":
+            await query.edit_message_text("Worker not found.")
+            return
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "Confirm Terminate",
+                    callback_data=f"{ADMIN_TERMINATE_CONFIRM_PREFIX}{worker_id}",
+                )
+            ],
+            [InlineKeyboardButton("Cancel", callback_data=ADMIN_TERMINATE_STAFF)],
+        ]
+        await query.edit_message_text(
+            f"Terminate {worker['name']} ({worker.get('worker_role')})?\n"
+            "They will be logged out and the role becomes claimable again.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
     if data == ADMIN_LIST_TASKS:
         tasks = store.list_tasks_for_admin()
         if not tasks:
@@ -580,6 +657,12 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             [
                 [
                     InlineKeyboardButton(
+                        "Edit verifier",
+                        callback_data=f"{ADMIN_EDIT_TASK_VERIFIER_PREFIX}{task_id}",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
                         "Toggle no-deduction",
                         callback_data=f"{ADMIN_TOGGLE_TASK_PENALTY_PREFIX}{task_id}",
                     )
@@ -631,6 +714,61 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.user_data["admin_state"] = "awaiting_edit_task_time"
         context.user_data["edit_task_id"] = task_id
         await query.edit_message_text("Send new task time in 24h format HH:MM.")
+        return
+
+    if data.startswith(ADMIN_EDIT_TASK_VERIFIER_PREFIX):
+        task_id = data.replace(ADMIN_EDIT_TASK_VERIFIER_PREFIX, "", 1)
+        task = store.get_task_by_id(task_id)
+        if not task or not task.get("active", True):
+            await query.edit_message_text("Task not found.")
+            return
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "Same as task manager",
+                    callback_data=f"{ADMIN_SET_TASK_VERIFIER_PREFIX}{task_id}:same",
+                )
+            ]
+        ]
+        for manager in store.list_users_by_role("manager"):
+            if manager["id"] == task.get("manager_id"):
+                continue
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        manager["name"],
+                        callback_data=f"{ADMIN_SET_TASK_VERIFIER_PREFIX}{task_id}:{manager['id']}",
+                    )
+                ]
+            )
+        await query.edit_message_text(
+            f"Select verifier for task {task['title']}:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data.startswith(ADMIN_SET_TASK_VERIFIER_PREFIX):
+        payload = data.replace(ADMIN_SET_TASK_VERIFIER_PREFIX, "", 1)
+        task_id, value = payload.split(":", maxsplit=1)
+        verifier_id = None if value == "same" else value
+        verifier_name = "Task manager"
+        if verifier_id:
+            verifier = store.get_user_by_id(verifier_id)
+            if not verifier or verifier.get("role") != "manager":
+                await query.edit_message_text("Verifier not found.")
+                return
+            verifier_name = verifier["name"]
+        try:
+            task = store.update_task(task_id, {"verifier_id": verifier_id})
+        except ValueError as exc:
+            await query.edit_message_text(f"Failed: {exc}")
+            return
+        await query.edit_message_text(
+            f"Verifier updated for task {task['title']}: {verifier_name}",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Back to tasks", callback_data=ADMIN_LIST_TASKS)]]
+            ),
+        )
         return
 
     if data.startswith(ADMIN_TOGGLE_TASK_PENALTY_PREFIX):
@@ -711,6 +849,36 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         manager_id = data.replace(ADMIN_TASK_MANAGER_PREFIX, "", 1)
         draft = context.user_data.get("task_draft", {})
         draft["manager_id"] = manager_id
+        context.user_data["task_draft"] = draft
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "Same as task manager",
+                    callback_data=f"{ADMIN_TASK_VERIFIER_PREFIX}same",
+                )
+            ]
+        ]
+        for manager in store.list_users_by_role("manager"):
+            if manager["id"] == manager_id:
+                continue
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        manager["name"],
+                        callback_data=f"{ADMIN_TASK_VERIFIER_PREFIX}{manager['id']}",
+                    )
+                ]
+            )
+        await query.edit_message_text(
+            "Who should verify this task when the worker responds?",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data.startswith(ADMIN_TASK_VERIFIER_PREFIX):
+        value = data.replace(ADMIN_TASK_VERIFIER_PREFIX, "", 1)
+        draft = context.user_data.get("task_draft", {})
+        draft["verifier_id"] = None if value == "same" else value
         context.user_data["task_draft"] = draft
         keyboard = [
             [
@@ -806,7 +974,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if data == ADMIN_REPORT:
-        await query.edit_message_text("Use /report to generate reports.")
+        await _send_report_role_choices(query, query.from_user.id, context)
         return
 
     if data == ADMIN_TESTMODE:
@@ -888,6 +1056,7 @@ async def _create_task_from_draft(target, context: ContextTypes.DEFAULT_TYPE) ->
             scheduled_date=draft.get("scheduled_date"),
             depends_on_task_id=draft.get("depends_on_task_id"),
             no_penalty=draft.get("no_penalty", False),
+            verifier_id=draft.get("verifier_id"),
         )
         scheduler.schedule_task_job(context.application, task)
         message = f"Task added and scheduled ({task['recurrence']})."
